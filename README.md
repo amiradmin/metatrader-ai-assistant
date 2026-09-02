@@ -49,4 +49,29 @@ Open `http://127.0.0.1:8000/docs`.
 
 Compile `mt5/ReadOnlySnapshotBridge.mq5` in MetaEditor and attach it to one chart. It contains no trading functions. Set `MT5_SNAPSHOT_PATH` in `.env` to the generated `mt5_snapshot.json` file.
 
+## Export M15 history for backtesting
+
+`mt5/HistoricalCsvExporter.mq5` is a one-shot, read-only script. It exports complete OHLCV history without placing or modifying orders.
+
+1. Pull the latest repository changes.
+2. Copy `HistoricalCsvExporter.mq5` into MetaTrader's `MQL5/Scripts` directory.
+3. Open it in MetaEditor and compile it.
+4. In MT5, open an `XAUUSD_o` M15 chart and load enough history.
+5. Drag `HistoricalCsvExporter` from Navigator > Scripts onto the chart.
+6. Keep these inputs:
+   - `InputSymbol = XAUUSD_o`
+   - `InputTimeframe = PERIOD_M15`
+   - `InputBars = 50000` (roughly up to two trading years)
+   - `IncludeCurrentBar = false`
+   - `OutputFile = xauusd_m15_history.csv`
+7. Find the result under `MQL5/Files/xauusd_m15_history.csv`.
+
+The CSV columns are:
+
+```text
+time,open,high,low,close,tick_volume,spread,real_volume
+```
+
+`time` is broker-server time, `spread` is stored in points, and the currently forming candle is excluded by default to prevent look-ahead contamination. The actual number of rows depends on how much history the broker makes available in the terminal.
+
 > This project is an educational decision-support tool, not a promise of profit or individualized financial advice.
