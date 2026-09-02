@@ -43,7 +43,7 @@ def build_hint(
 
     currencies = {snapshot.symbol[:3].upper(), snapshot.symbol[3:6].upper()}
     relevant = sorted(
-        (item for item in news if item.currencies & currencies),
+        (item for item in news if item.impact_score > 0 and item.currencies & currencies),
         key=lambda item: item.impact_score,
         reverse=True,
     )[:5]
