@@ -14,12 +14,27 @@ string EscapeJson(string value)
    return value;
 }
 
+string UtcIsoTimestamp()
+{
+   MqlDateTime value;
+   TimeToStruct(TimeGMT(), value);
+   return StringFormat(
+      "%04d-%02d-%02dT%02d:%02d:%02dZ",
+      value.year,
+      value.mon,
+      value.day,
+      value.hour,
+      value.min,
+      value.sec
+   );
+}
+
 int OnInit()
 {
    if(InputBars < 20)
       return INIT_PARAMETERS_INCORRECT;
    SymbolSelect(InputSymbol, true);
-   EventSetTimer(MathMax(1, InputIntervalSeconds));
+   EventSetTimer((int)MathMax(1, InputIntervalSeconds));
    return INIT_SUCCEEDED;
 }
 
@@ -44,19 +59,20 @@ void OnTimer()
    if(handle == INVALID_HANDLE)
       return;
 
+   int digits = (int)SymbolInfoInteger(InputSymbol, SYMBOL_DIGITS);
    string json = "{";
    json += "\"symbol\":\"" + EscapeJson(InputSymbol) + "\",";
    json += "\"timeframe\":\"" + EnumToString(InputTimeframe) + "\",";
-   json += "\"generated_at\":\"" + TimeToString(TimeGMT(), TIME_DATE|TIME_SECONDS) + "Z\",";
-   json += "\"bid\":" + DoubleToString(tick.bid, (int)SymbolInfoInteger(InputSymbol, SYMBOL_DIGITS)) + ",";
-   json += "\"ask\":" + DoubleToString(tick.ask, (int)SymbolInfoInteger(InputSymbol, SYMBOL_DIGITS)) + ",";
+   json += "\"generated_at\":\"" + UtcIsoTimestamp() + "\",";
+   json += "\"bid\":" + DoubleToString(tick.bid, digits) + ",";
+   json += "\"ask\":" + DoubleToString(tick.ask, digits) + ",";
    json += "\"balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + ",";
    json += "\"equity\":" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + ",";
    json += "\"positions_total\":" + IntegerToString(PositionsTotal()) + ",";
    json += "\"closes\":[";
    for(int i=copied-1; i>=0; i--)
    {
-      json += DoubleToString(closes[i], (int)SymbolInfoInteger(InputSymbol, SYMBOL_DIGITS));
+      json += DoubleToString(closes[i], digits);
       if(i > 0)
          json += ",";
    }
