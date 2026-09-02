@@ -26,5 +26,5 @@ async def hint() -> TradeHint:
     except SnapshotError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    news = await collect_news(settings.rss_urls)
+    news = await collect_news(settings.rss_urls, settings.news_lookback_hours)
     return build_hint(snapshot, news, settings.max_risk_percent)
