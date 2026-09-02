@@ -1,7 +1,7 @@
 """RSS news ingestion and conservative market-impact scoring."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import feedparser
@@ -74,13 +74,34 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> list[NewsItem]:
     return items
 
 
-async def collect_news(urls: tuple[str, ...]) -> list[NewsItem]:
-    """Collect feeds concurrently while tolerating a failed source."""
+def recent_news(
+    items: list[NewsItem],
+    lookback_hours: int,
+    now: datetime | None = None,
+) -> list[NewsItem]:
+    """Keep only timestamped items inside the configured decision window."""
+    current = now or datetime.now(timezone.utc)
+    cutoff = current - timedelta(hours=lookback_hours)
+    future_tolerance = current + timedelta(minutes=5)
+    return [
+        item
+        for item in items
+        if item.published_at is not None
+        and cutoff <= item.published_at <= future_tolerance
+    ]
+
+
+async def collect_news(
+    urls: tuple[str, ...],
+    lookback_hours: int,
+) -> list[NewsItem]:
+    """Collect feeds concurrently and discard stale or undated items."""
     async with httpx.AsyncClient(timeout=12, headers={"User-Agent": "MT5-AI-Assistant/0.1"}) as client:
         results = await asyncio.gather(
             *(fetch_feed(client, url) for url in urls), return_exceptions=True
         )
-    return [item for result in results if isinstance(result, list) for item in result]
+    collected = [item for result in results if isinstance(result, list) for item in result]
+    return recent_news(collected, lookback_hours)
 
 
 def risk_for_symbol(symbol: str, items: list[NewsItem]) -> NewsRisk:
