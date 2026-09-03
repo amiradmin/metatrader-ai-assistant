@@ -12,8 +12,9 @@ Frozen candidate:
 - one shadow position at a time
 - default SL=300 points, TP=600 points, point size=0.01
 
-H1/H4, real-yield and economic-calendar context is logged to a separate CSV.
-Those context fields are observational only and cannot change eligibility.
+H1/H4, real-yield, calendar, CFTC and dollar-index context is logged to a
+separate CSV. Those context fields are observational only and cannot change
+eligibility.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from meta_trader_ai.config import settings
 from meta_trader_ai.market_context import MarketContextCollector, MarketContextFeatures
 from meta_trader_ai.models import Action, MarketSnapshot
 from meta_trader_ai.regime import TrendRegime, VolatilityRegime, classify_regime
+from meta_trader_ai.research_context import ResearchContextCollector, ResearchContextFeatures
 from meta_trader_ai.signals import _atr, build_hint
 
 
@@ -132,8 +134,29 @@ def evaluate_snapshot(snapshot: MarketSnapshot) -> ShadowDecision:
     )
 
 
+def _ensure_csv_schema(path: Path, fields: list[str]) -> None:
+    """Add new observer columns without discarding already-collected rows."""
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        existing_fields = reader.fieldnames or []
+        if existing_fields == fields:
+            return
+        rows = list(reader)
+
+    temporary = path.with_suffix(path.suffix + ".schema_tmp")
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fields})
+    temporary.replace(path)
+
+
 def _append_csv(path: Path, fields: list[str], row: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_csv_schema(path, fields)
     new_file = not path.exists() or path.stat().st_size == 0
     with path.open("a", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -189,9 +212,11 @@ def _record_market_context(
     path: Path,
     decision: ShadowDecision,
     context: MarketContextFeatures,
+    research: ResearchContextFeatures,
 ) -> None:
-    """Persist observational context separately so the frozen strategy stays clean."""
+    """Persist observer context separately so the frozen strategy stays clean."""
     row = asdict(context)
+    row.update(asdict(research))
     row.update(
         {
             "observed_at_utc": datetime.now(UTC).isoformat(),
@@ -226,7 +251,26 @@ def _record_market_context(
         "next_event_utc",
         "minutes_to_event",
         "event_timing_quality",
+        "ff_next_event_name",
+        "ff_next_event_impact",
+        "ff_next_event_utc",
+        "ff_minutes_to_event",
+        "ff_forecast",
+        "ff_previous",
+        "cot_gold_report_date",
+        "cot_mm_long",
+        "cot_mm_short",
+        "cot_mm_net",
+        "cot_mm_net_change",
+        "dxy_value",
+        "dxy_change_1d_pct",
+        "dxy_change_5d_pct",
+        "dxy_trend_5d",
+        "dxy_observation_date",
+        "dxy_source",
+        "dxy_is_proxy",
         "context_errors",
+        "research_errors",
     ]
     _append_csv(path, fields, row)
 
@@ -300,6 +344,11 @@ def main() -> None:
         type=Path,
         default=Path("data/market_context_cache.json"),
     )
+    parser.add_argument(
+        "--research-cache",
+        type=Path,
+        default=Path("data/research_context_cache.json"),
+    )
     parser.add_argument("--trades", type=Path, default=Path("data/shadow_trades.csv"))
     parser.add_argument("--state", type=Path, default=Path("data/shadow_state.json"))
     args = parser.parse_args()
@@ -313,11 +362,15 @@ def main() -> None:
         mt5_context_path=args.mt5_context,
         cache_path=args.context_cache,
     )
+    research_collector = ResearchContextCollector(cache_path=args.research_cache)
     last_bucket, active = _load_state(args.state)
     first_fresh_snapshot = last_bucket is None
     print("Frozen shadow candidate: BUY + UP trend + LOW volatility + momentum 1.50-2.00 ATR")
     print("No broker orders are sent. /hint and execution EAs are unchanged.")
-    print("Observer context: H1/H4 + FRED DFII10 + BLS/FOMC calendar (no decision impact).")
+    print(
+        "Observer context: H1/H4 + real yield + official calendar + "
+        "FF high-impact USD + CFTC Gold + DXY (no decision impact)."
+    )
 
     while True:
         try:
@@ -369,25 +422,40 @@ def main() -> None:
                         symbol=decision.symbol,
                         now=snapshot.generated_at,
                     )
-                    _record_market_context(args.context_observations, decision, context)
+                    research = research_collector.collect(now=snapshot.generated_at)
+                    _record_market_context(
+                        args.context_observations,
+                        decision,
+                        context,
+                        research,
+                    )
                     last_bucket = decision.bucket
 
                     event_text = "none"
-                    if context.next_event_name:
+                    if research.ff_next_event_name:
                         event_text = (
-                            f"{context.next_event_name} in "
-                            f"{context.minutes_to_event:.0f}m"
+                            f"{research.ff_next_event_name} in {research.ff_minutes_to_event:.0f}m"
+                            if research.ff_minutes_to_event is not None
+                            else research.ff_next_event_name
+                        )
+                    elif context.next_event_name:
+                        event_text = (
+                            f"{context.next_event_name} in {context.minutes_to_event:.0f}m"
                             if context.minutes_to_event is not None
                             else context.next_event_name
                         )
+
                     print(
                         "context "
                         f"H1={context.h1_trend} H4={context.h4_trend} "
                         f"realYield={context.real_yield_10y} "
-                        f"next={event_text}"
+                        f"DXY={research.dxy_value}({research.dxy_trend_5d}) "
+                        f"COTnet={research.cot_mm_net} next={event_text}"
                     )
                     if context.context_errors:
-                        print(f"context warning: {context.context_errors}")
+                        print(f"official-context warning: {context.context_errors}")
+                    if research.research_errors:
+                        print(f"research-context warning: {research.research_errors}")
 
                     if decision.eligible and active is None:
                         active = ActiveTrade(
