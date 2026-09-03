@@ -1,9 +1,14 @@
 #property strict
-#property description "Read-only API signal panel. Contains no order functions."
+#property description "Readable read-only API signal panel. Contains no order functions."
 
 input string ApiUrl = "http://127.0.0.1:8000/hint";
 input int RefreshSeconds = 60;
 input int RequestTimeoutMs = 45000;
+input int PanelWidth = 460;
+input int PanelHeight = 330;
+input int PanelFontSize = 14;
+
+string Prefix = "ReadOnlySignalPanel_";
 
 string JsonValue(const string json, const string key)
 {
@@ -44,6 +49,48 @@ string JsonValue(const string json, const string key)
    return StringSubstr(json, position, ending - position);
 }
 
+void CreateBackground()
+{
+   string name = Prefix + "Background";
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 40);
+   ObjectSetInteger(0, name, OBJPROP_XSIZE, PanelWidth);
+   ObjectSetInteger(0, name, OBJPROP_YSIZE, PanelHeight);
+   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, C'20,24,31');
+   ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, C'80,90,105');
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+}
+
+void SetLine(
+   const string id,
+   const string text,
+   const int y,
+   const int font_size,
+   const color text_color
+)
+{
+   string name = Prefix + id;
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_RIGHT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 42);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, font_size);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, text_color);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetString(0, name, OBJPROP_FONT, "DejaVu Sans");
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+}
+
 void ShowPanel(
    const string status,
    const string action,
@@ -54,24 +101,47 @@ void ShowPanel(
    const string generated_at
 )
 {
+   CreateBackground();
+
+   color action_color = clrGold;
    string guidance = "NO NEW TRADE";
    if(action == "BUY")
-      guidance = "BUY BIAS ONLY - MANUAL CONFIRMATION REQUIRED";
+   {
+      action_color = clrLime;
+      guidance = "BUY BIAS - MANUAL CONFIRMATION REQUIRED";
+   }
    else if(action == "SELL")
-      guidance = "SELL BIAS ONLY - MANUAL CONFIRMATION REQUIRED";
+   {
+      action_color = clrTomato;
+      guidance = "SELL BIAS - MANUAL CONFIRMATION REQUIRED";
+   }
 
-   Comment(
-      "AI TRADING ASSISTANT - READ ONLY\n",
-      "Status: ", status, "\n",
-      "Symbol: ", symbol, "\n",
-      "Decision: ", action, "\n",
-      "Confidence: ", confidence, " / 100\n",
-      "Technical score: ", technical_score, "\n",
-      "News risk: ", news_risk, "\n",
-      "Guidance: ", guidance, "\n",
-      "Generated UTC: ", generated_at, "\n\n",
-      "This panel never places or modifies orders."
-   );
+   SetLine("Hello", "Hello Amir", 58, PanelFontSize + 5, clrWhite);
+   SetLine("Title", "AI TRADING ASSISTANT  |  READ ONLY", 92, PanelFontSize, clrDeepSkyBlue);
+   SetLine("Status", "Status: " + status, 126, PanelFontSize, clrSilver);
+   SetLine("Symbol", "Symbol: " + symbol, 158, PanelFontSize, clrWhite);
+   SetLine("Decision", "Decision: " + action, 190, PanelFontSize + 3, action_color);
+   SetLine("Confidence", "Confidence: " + confidence + " / 100", 226, PanelFontSize, clrWhite);
+   SetLine("Technical", "Technical score: " + technical_score, 258, PanelFontSize, clrWhite);
+   SetLine("News", "News risk: " + news_risk, 290, PanelFontSize, clrWhite);
+   SetLine("Guidance", guidance, 322, PanelFontSize - 1, action_color);
+   SetLine("Time", "UTC: " + generated_at, 350, PanelFontSize - 3, clrSilver);
+   ChartRedraw();
+}
+
+void DeletePanel()
+{
+   ObjectDelete(0, Prefix + "Background");
+   ObjectDelete(0, Prefix + "Hello");
+   ObjectDelete(0, Prefix + "Title");
+   ObjectDelete(0, Prefix + "Status");
+   ObjectDelete(0, Prefix + "Symbol");
+   ObjectDelete(0, Prefix + "Decision");
+   ObjectDelete(0, Prefix + "Confidence");
+   ObjectDelete(0, Prefix + "Technical");
+   ObjectDelete(0, Prefix + "News");
+   ObjectDelete(0, Prefix + "Guidance");
+   ObjectDelete(0, Prefix + "Time");
 }
 
 bool RefreshHint()
@@ -107,9 +177,7 @@ bool RefreshHint()
       Print(
          "ReadOnlySignalPanel WebRequest failed: ",
          error_code,
-         ". Add ",
-         ApiUrl,
-         " under Tools > Options > Expert Advisors > Allow WebRequest."
+         ". Add http://127.0.0.1:8000 under Tools > Options > Expert Advisors."
       );
       return false;
    }
@@ -174,5 +242,6 @@ void OnTimer()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   Comment("");
+   DeletePanel();
+   ChartRedraw();
 }
