@@ -6,6 +6,7 @@
 input string ApiUrl = "http://127.0.0.1:8000/hint";
 input int RefreshSeconds = 60;
 input int RequestTimeoutMs = 45000;
+input int MinPanelConfidence = 75;
 input int PanelWidth = 460;
 input int PanelHeight = 430;
 input int PanelFontSize = 14;
@@ -171,7 +172,13 @@ void ShowPanel(
    SetLine("Status", "Status: " + status, 126, PanelFontSize, clrWhite);
    SetLine("Symbol", "Symbol: " + symbol + "  |  M15", 158, PanelFontSize, clrWhite);
    SetLine("Decision", "Decision: " + action, 190, PanelFontSize + 3, action_color);
-   SetLine("Confidence", "Confidence: " + confidence + " / 100", 226, PanelFontSize, clrWhite);
+   SetLine(
+      "Confidence",
+      "Confidence: " + confidence + " / 100  |  Min: " + IntegerToString(MinPanelConfidence),
+      226,
+      PanelFontSize,
+      clrWhite
+   );
    SetLine("Technical", "Technical score: " + technical_score, 258, PanelFontSize, clrWhite);
    SetLine("News", "News risk: " + news_risk, 290, PanelFontSize, clrWhite);
    SetLine(
@@ -304,9 +311,21 @@ bool RefreshHint()
    if(tipranks_adjustment == "")
       tipranks_adjustment = "0";
 
+   string panel_action = action;
+   string panel_status = "CONNECTED";
+   int confidence_value = (int)StringToInteger(confidence);
+   if(
+      (action == "BUY" || action == "SELL")
+      && confidence_value < MinPanelConfidence
+   )
+   {
+      panel_action = "WAIT";
+      panel_status = "CONNECTED | BELOW CONF " + IntegerToString(MinPanelConfidence);
+   }
+
    ShowPanel(
-      "CONNECTED",
-      action,
+      panel_status,
+      panel_action,
       symbol,
       confidence,
       technical_score,
@@ -320,7 +339,14 @@ bool RefreshHint()
 
 int OnInit()
 {
-   if(RefreshSeconds < 5 || RequestTimeoutMs < 1000 || PanelOpacityPercent < 0 || PanelOpacityPercent > 100)
+   if(
+      RefreshSeconds < 5
+      || RequestTimeoutMs < 1000
+      || MinPanelConfidence < 0
+      || MinPanelConfidence > 100
+      || PanelOpacityPercent < 0
+      || PanelOpacityPercent > 100
+   )
       return INIT_PARAMETERS_INCORRECT;
 
    EventSetMillisecondTimer(500);
