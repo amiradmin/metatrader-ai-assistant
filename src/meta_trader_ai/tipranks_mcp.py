@@ -32,6 +32,8 @@ def _first_quote(payload: object) -> dict[str, object]:
 def _result_payload(result: object) -> object:
     """Prefer structured MCP content and fall back to JSON text content."""
     structured = getattr(result, "structuredContent", None)
+    if structured is None:
+        structured = getattr(result, "structured_content", None)
     if structured:
         return structured
 
