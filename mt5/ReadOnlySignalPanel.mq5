@@ -65,9 +65,11 @@ void CreateBackground()
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, PanelTop);
    ObjectSetInteger(0, name, OBJPROP_XSIZE, PanelWidth);
    ObjectSetInteger(0, name, OBJPROP_YSIZE, PanelHeight);
+   // MT5 rectangle labels do not expose an alpha channel. Drawing the panel
+   // behind price candles gives the stable visual equivalent of a 50% overlay.
    ObjectSetInteger(0, name, OBJPROP_BGCOLOR, C'20,24,31');
    ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, C'80,90,105');
-   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
 }
