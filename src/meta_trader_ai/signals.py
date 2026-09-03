@@ -2,7 +2,14 @@
 
 from datetime import datetime, timezone
 
-from meta_trader_ai.models import Action, MarketSnapshot, NewsItem, NewsRisk, TradeHint
+from meta_trader_ai.models import (
+    Action,
+    MarketSnapshot,
+    NewsItem,
+    NewsRisk,
+    TipRanksContext,
+    TradeHint,
+)
 from meta_trader_ai.news import risk_for_symbol
 
 
@@ -79,17 +86,19 @@ def _m15_score(snapshot: MarketSnapshot) -> tuple[int, float, float, float, list
 
     ema_gap_atr = (ema9 - ema21) / atr14
     trend_component = _clamp(ema_gap_atr * 18.0, -45.0, 45.0)
-
     rsi_component = _clamp((rsi14 - 50.0) * 0.4, -20.0, 20.0)
-
     momentum_4 = (closes[-1] - closes[-5]) / atr14
     momentum_component = _clamp(momentum_4 * 4.0, -15.0, 15.0)
 
-    score = int(round(_clamp(
-        trend_component + rsi_component + momentum_component,
-        -100.0,
-        100.0,
-    )))
+    score = int(
+        round(
+            _clamp(
+                trend_component + rsi_component + momentum_component,
+                -100.0,
+                100.0,
+            )
+        )
+    )
     reasons = [
         f"M15 EMA9={ema9:.5f}, EMA21={ema21:.5f}",
         f"M15 RSI14={rsi14:.1f}, ATR14={atr14:.5f}",
@@ -146,12 +155,57 @@ def _direction_and_confidence(
     return action, int(round(_clamp(confidence, 0.0, 100.0))), reasons
 
 
+def _tipranks_adjustment(
+    action: Action,
+    context: TipRanksContext | None,
+) -> tuple[int, list[str]]:
+    """Use TipRanks only as a small higher-timeframe confirmation layer."""
+    if context is None:
+        return 0, ["TipRanks context unavailable or stale; no confidence adjustment."]
+
+    bias = 0
+    components: list[str] = []
+
+    if context.change_percentage is not None:
+        if context.change_percentage >= 0.10:
+            bias += 2
+        elif context.change_percentage <= -0.10:
+            bias -= 2
+        components.append(f"day change={context.change_percentage:+.2f}%")
+
+    if context.price_avg_50 is not None:
+        above_50 = context.price >= context.price_avg_50
+        bias += 2 if above_50 else -2
+        components.append("above 50D avg" if above_50 else "below 50D avg")
+
+    if context.price_avg_200 is not None:
+        above_200 = context.price >= context.price_avg_200
+        bias += 2 if above_200 else -2
+        components.append("above 200D avg" if above_200 else "below 200D avg")
+
+    detail = ", ".join(components) if components else "no directional fields"
+    if action is Action.WAIT or bias == 0:
+        return 0, [f"TipRanks context neutral for M15 decision ({detail})."]
+
+    aligned = (action is Action.BUY and bias > 0) or (
+        action is Action.SELL and bias < 0
+    )
+    magnitude = min(6, abs(bias))
+    adjustment = magnitude if aligned else -magnitude
+    direction = "confirmed" if aligned else "opposed"
+    return adjustment, [
+        f"TipRanks higher-timeframe context {direction} M15 bias "
+        f"({detail}); confidence adjustment={adjustment:+d}."
+    ]
+
+
 def build_hint(
     snapshot: MarketSnapshot,
     news: list[NewsItem],
     max_risk_percent: float,
+    tipranks_context: TipRanksContext | None = None,
 ) -> TradeHint:
-    """Build a dynamic M15-first hint with a hard high-impact-news gate."""
+    """Build a dynamic M15-first hint with news and optional TipRanks context."""
     technical_score, rsi14, atr14, ema_gap, reasons = _m15_score(snapshot)
     spread = max(0.0, snapshot.ask - snapshot.bid)
     spread_to_atr = spread / atr14
@@ -184,6 +238,13 @@ def build_hint(
             news_risk,
         )
         reasons.extend(confidence_reasons)
+
+        adjustment, tipranks_reasons = _tipranks_adjustment(
+            action,
+            tipranks_context,
+        )
+        confidence = int(round(_clamp(confidence + adjustment, 0.0, 100.0)))
+        reasons.extend(tipranks_reasons)
 
         if action in {Action.BUY, Action.SELL} and confidence < MIN_ACTION_CONFIDENCE:
             reasons.append(
