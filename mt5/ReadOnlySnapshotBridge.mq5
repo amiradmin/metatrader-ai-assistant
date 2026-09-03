@@ -1,11 +1,17 @@
 #property strict
-#property description "Read-only M15-first snapshot exporter. Contains no order functions."
+#property description "Read-only M15 snapshot + H1/H4 context exporter. Contains no order functions."
 
-input string InputSymbol = "EURUSD";
+input string InputSymbol = "XAUUSD_o";
 input ENUM_TIMEFRAMES InputTimeframe = PERIOD_M15;
 input int InputBars = 100;
 input int InputIntervalSeconds = 5;
 input string OutputFile = "mt5_snapshot.json";
+
+// Export H1/H4 from the SAME EA so market structure cannot go stale just
+// because a second bridge was detached from another chart.
+input bool ExportHigherTimeframeContext = true;
+input int ContextBars = 100;
+input string ContextOutputFile = "mt5_context.json";
 
 string EscapeJson(string value)
 {
@@ -50,38 +56,67 @@ string RatesField(MqlRates &rates[], int copied, string field, int digits)
    return json;
 }
 
-int OnInit()
+bool CopyCompletedRates(
+   const ENUM_TIMEFRAMES timeframe,
+   const int requested_bars,
+   MqlRates &rates[],
+   int &copied,
+   const int minimum_bars
+)
 {
-   if(InputBars < 21)
-      return INIT_PARAMETERS_INCORRECT;
-   SymbolSelect(InputSymbol, true);
-   EventSetTimer((int)MathMax(1, InputIntervalSeconds));
-   return INIT_SUCCEEDED;
-}
-
-void OnDeinit(const int reason)
-{
-   EventKillTimer();
-}
-
-void OnTimer()
-{
-   MqlTick tick;
-   if(!SymbolInfoTick(InputSymbol, tick))
-      return;
-
-   // Start at shift=1 so indicators use completed candles only.
-   MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   int copied = CopyRates(InputSymbol, InputTimeframe, 1, InputBars, rates);
-   if(copied < 21)
-      return;
+   // shift=1 excludes the still-forming candle on every timeframe.
+   copied = CopyRates(InputSymbol, timeframe, 1, requested_bars, rates);
+   return copied >= minimum_bars;
+}
 
-   int handle = FileOpen(OutputFile, FILE_WRITE|FILE_TXT|FILE_ANSI);
+string TimeframeJson(
+   const string name,
+   const ENUM_TIMEFRAMES timeframe,
+   MqlRates &rates[],
+   const int copied,
+   const int digits
+)
+{
+   string json = "\"" + name + "\":{";
+   json += "\"timeframe\":\"" + EnumToString(timeframe) + "\",";
+   json += RatesField(rates, copied, "opens", digits) + ",";
+   json += RatesField(rates, copied, "highs", digits) + ",";
+   json += RatesField(rates, copied, "lows", digits) + ",";
+   json += RatesField(rates, copied, "closes", digits);
+   json += "}";
+   return json;
+}
+
+bool WriteTextFile(const string file_name, const string payload)
+{
+   int handle = FileOpen(file_name, FILE_WRITE|FILE_TXT|FILE_ANSI);
    if(handle == INVALID_HANDLE)
-      return;
+   {
+      Print(
+         "ReadOnlySnapshotBridge FileOpen failed for ",
+         file_name,
+         ": ",
+         GetLastError()
+      );
+      return false;
+   }
 
-   int digits = (int)SymbolInfoInteger(InputSymbol, SYMBOL_DIGITS);
+   FileWriteString(handle, payload);
+   FileClose(handle);
+   return true;
+}
+
+bool WriteSnapshot(const MqlTick &tick, const int digits)
+{
+   MqlRates rates[];
+   int copied = 0;
+   if(!CopyCompletedRates(InputTimeframe, InputBars, rates, copied, 21))
+   {
+      Print("ReadOnlySnapshotBridge: not enough completed primary-timeframe bars yet.");
+      return false;
+   }
+
    string json = "{";
    json += "\"symbol\":\"" + EscapeJson(InputSymbol) + "\",";
    json += "\"timeframe\":\"" + EnumToString(InputTimeframe) + "\",";
@@ -97,6 +132,74 @@ void OnTimer()
    json += RatesField(rates, copied, "closes", digits);
    json += "}";
 
-   FileWriteString(handle, json);
-   FileClose(handle);
+   return WriteTextFile(OutputFile, json);
+}
+
+bool WriteHigherTimeframeContext(const int digits)
+{
+   if(!ExportHigherTimeframeContext)
+      return true;
+
+   MqlRates h1[];
+   MqlRates h4[];
+   int copied_h1 = 0;
+   int copied_h4 = 0;
+
+   if(!CopyCompletedRates(PERIOD_H1, ContextBars, h1, copied_h1, 65))
+   {
+      Print("ReadOnlySnapshotBridge: H1 context is not ready yet.");
+      return false;
+   }
+   if(!CopyCompletedRates(PERIOD_H4, ContextBars, h4, copied_h4, 65))
+   {
+      Print("ReadOnlySnapshotBridge: H4 context is not ready yet.");
+      return false;
+   }
+
+   string json = "{";
+   json += "\"symbol\":\"" + EscapeJson(InputSymbol) + "\",";
+   json += "\"generated_at\":\"" + UtcIsoTimestamp() + "\",";
+   json += TimeframeJson("h1", PERIOD_H1, h1, copied_h1, digits) + ",";
+   json += TimeframeJson("h4", PERIOD_H4, h4, copied_h4, digits);
+   json += "}";
+
+   return WriteTextFile(ContextOutputFile, json);
+}
+
+int OnInit()
+{
+   if(InputBars < 21 || InputIntervalSeconds < 1)
+      return INIT_PARAMETERS_INCORRECT;
+   if(ExportHigherTimeframeContext && ContextBars < 65)
+      return INIT_PARAMETERS_INCORRECT;
+
+   if(!SymbolSelect(InputSymbol, true))
+   {
+      Print("ReadOnlySnapshotBridge: could not select symbol ", InputSymbol, ".");
+      return INIT_FAILED;
+   }
+
+   EventSetTimer((int)MathMax(1, InputIntervalSeconds));
+   Print(
+      "ReadOnlySnapshotBridge ready: symbol=", InputSymbol,
+      " snapshot=", OutputFile,
+      " htf_context=", ExportHigherTimeframeContext ? ContextOutputFile : "OFF"
+   );
+   return INIT_SUCCEEDED;
+}
+
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+}
+
+void OnTimer()
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(InputSymbol, tick))
+      return;
+
+   int digits = (int)SymbolInfoInteger(InputSymbol, SYMBOL_DIGITS);
+   WriteSnapshot(tick, digits);
+   WriteHigherTimeframeContext(digits);
 }
