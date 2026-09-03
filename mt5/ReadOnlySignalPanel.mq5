@@ -7,8 +7,13 @@ input int RequestTimeoutMs = 45000;
 input int PanelWidth = 460;
 input int PanelHeight = 330;
 input int PanelFontSize = 14;
+input int PanelLeft = 20;
+input int PanelTop = 170;
 
 string Prefix = "ReadOnlySignalPanel_";
+color CurrentActionColor = clrGold;
+bool BlinkVisible = true;
+ulong LastApiRefreshMs = 0;
 
 string JsonValue(const string json, const string key)
 {
@@ -55,9 +60,9 @@ void CreateBackground()
    if(ObjectFind(0, name) < 0)
       ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
 
-   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 20);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 40);
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, PanelLeft);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, PanelTop);
    ObjectSetInteger(0, name, OBJPROP_XSIZE, PanelWidth);
    ObjectSetInteger(0, name, OBJPROP_YSIZE, PanelHeight);
    ObjectSetInteger(0, name, OBJPROP_BGCOLOR, C'20,24,31');
@@ -79,10 +84,10 @@ void SetLine(
    if(ObjectFind(0, name) < 0)
       ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
 
-   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_RIGHT_UPPER);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 42);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, PanelLeft + 22);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, PanelTop + y - 40);
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, font_size);
    ObjectSetInteger(0, name, OBJPROP_COLOR, text_color);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
@@ -116,6 +121,9 @@ void ShowPanel(
       guidance = "SELL BIAS - MANUAL CONFIRMATION REQUIRED";
    }
 
+   CurrentActionColor = action_color;
+   BlinkVisible = true;
+
    SetLine("Hello", "Hello Amir", 58, PanelFontSize + 5, clrWhite);
    SetLine("Title", "AI TRADING ASSISTANT  |  READ ONLY", 92, PanelFontSize, clrDeepSkyBlue);
    SetLine("Status", "Status: " + status, 126, PanelFontSize, clrSilver);
@@ -142,6 +150,14 @@ void DeletePanel()
    ObjectDelete(0, Prefix + "News");
    ObjectDelete(0, Prefix + "Guidance");
    ObjectDelete(0, Prefix + "Time");
+}
+
+void BlinkDecision()
+{
+   BlinkVisible = !BlinkVisible;
+   color visible_color = BlinkVisible ? CurrentActionColor : C'20,24,31';
+   ObjectSetInteger(0, Prefix + "Decision", OBJPROP_COLOR, visible_color);
+   ChartRedraw();
 }
 
 bool RefreshHint()
@@ -228,15 +244,23 @@ int OnInit()
    if(RefreshSeconds < 5 || RequestTimeoutMs < 1000)
       return INIT_PARAMETERS_INCORRECT;
 
-   EventSetTimer(RefreshSeconds);
+   EventSetMillisecondTimer(500);
    ShowPanel("CONNECTING", "WAIT", _Symbol, "0", "0", "UNKNOWN", "-");
    RefreshHint();
+   LastApiRefreshMs = GetTickCount64();
    return INIT_SUCCEEDED;
 }
 
 void OnTimer()
 {
-   RefreshHint();
+   BlinkDecision();
+
+   ulong now_ms = GetTickCount64();
+   if(now_ms - LastApiRefreshMs >= (ulong)RefreshSeconds * 1000)
+   {
+      RefreshHint();
+      LastApiRefreshMs = now_ms;
+   }
 }
 
 void OnDeinit(const int reason)
