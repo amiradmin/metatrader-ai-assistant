@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     )
     economic_calendar_cache_seconds: int = 300
     economic_calendar_stale_fallback_minutes: int = 180
+    economic_calendar_request_timeout_seconds: float = 25.0
+    economic_calendar_failure_cooldown_seconds: int = 60
+    economic_calendar_max_attempts: int = 2
     economic_calendar_high_before_minutes: int = 30
     economic_calendar_high_after_minutes: int = 30
     economic_calendar_medium_before_minutes: int = 15
