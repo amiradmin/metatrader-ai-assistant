@@ -5,16 +5,20 @@ from meta_trader_ai.news import recent_news
 from meta_trader_ai.signals import build_hint
 
 
-def snapshot() -> MarketSnapshot:
+def snapshot(
+    closes: list[float] | None = None,
+    timeframe: str = "PERIOD_M15",
+) -> MarketSnapshot:
+    values = closes or [1 + i / 1000 for i in range(20)]
     return MarketSnapshot(
         symbol="EURUSD",
-        timeframe="M15",
+        timeframe=timeframe,
         generated_at=datetime.now(timezone.utc),
-        bid=1.1,
-        ask=1.1001,
+        bid=values[-1],
+        ask=values[-1] + 0.0001,
         balance=1000,
         equity=1000,
-        closes=[1 + i / 1000 for i in range(20)],
+        closes=values,
     )
 
 
@@ -30,6 +34,7 @@ def test_high_impact_news_forces_wait() -> None:
     ]
     hint = build_hint(snapshot(), news, 0.5)
     assert hint.action is Action.WAIT
+    assert hint.confidence == 85
 
 
 def test_stale_news_is_excluded() -> None:
@@ -45,8 +50,24 @@ def test_stale_news_is_excluded() -> None:
     assert recent_news([old_item], lookback_hours=24, now=now) == []
 
 
-def test_low_confidence_direction_is_forced_to_wait() -> None:
-    hint = build_hint(snapshot(), [], 0.5)
-    assert hint.confidence == 55
+def test_m15_confidence_is_dynamic_and_can_clear_threshold() -> None:
+    strong_uptrend = [1 + i / 1000 for i in range(20)]
+    hint = build_hint(snapshot(strong_uptrend), [], 0.5)
+    assert hint.technical_score >= 30
+    assert hint.confidence >= 70
+    assert hint.action is Action.BUY
+
+
+def test_flat_m15_market_waits_with_lower_confidence() -> None:
+    flat = [1.1000] * 20
+    hint = build_hint(snapshot(flat), [], 0.5)
+    assert hint.technical_score == 0
+    assert hint.confidence < 70
     assert hint.action is Action.WAIT
-    assert any("below safety threshold" in reason for reason in hint.reasons)
+
+
+def test_non_m15_timeframe_is_read_only_wait() -> None:
+    hint = build_hint(snapshot(timeframe="PERIOD_H1"), [], 0.5)
+    assert hint.action is Action.WAIT
+    assert hint.confidence == 55
+    assert any("M15-first" in reason for reason in hint.reasons)
