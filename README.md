@@ -49,6 +49,24 @@ Open `http://127.0.0.1:8000/docs`.
 
 Compile `mt5/ReadOnlySnapshotBridge.mq5` in MetaEditor and attach it to one chart. It contains no trading functions. Set `MT5_SNAPSHOT_PATH` in `.env` to the generated `mt5_snapshot.json` file.
 
+## MT5 read-only signal panel
+
+`mt5/ReadOnlySignalPanel.mq5` displays the local API decision directly on an
+MT5 chart. It contains no order-placement or order-modification functions.
+
+1. Copy the file into MetaTrader's `MQL5/Experts` directory and compile it.
+2. In MT5, open Tools > Options > Expert Advisors.
+3. Enable "Allow WebRequest for listed URL" and add
+   `http://127.0.0.1:8000`.
+4. Keep the Python API running.
+5. Attach `ReadOnlySignalPanel` to the chart.
+6. Keep global Algo Trading disabled during development.
+
+The panel displays connection status, symbol, WAIT/BUY/SELL decision,
+confidence, technical score, news risk, UTC generation time, and read-only
+guidance. A directional bias is never an instruction or guarantee, and manual
+validation remains required.
+
 ## Export M15 history for backtesting
 
 `mt5/HistoricalCsvExporter.mq5` is a one-shot, read-only script. It exports complete OHLCV history without placing or modifying orders.
