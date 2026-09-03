@@ -19,9 +19,9 @@ class Settings(BaseSettings):
 
     tipranks_context_enabled: bool = True
     tipranks_context_path: Path = Path("data/tipranks_context.json")
-    tipranks_context_max_age_minutes: int = 90
+    tipranks_context_max_age_minutes: int = 1500
     tipranks_auto_refresh_enabled: bool = True
-    tipranks_refresh_minutes: int = 60
+    tipranks_refresh_minutes: int = 1440
     tipranks_mcp_url: str = "https://mcp.tipranks.com/mcp/"
     tipranks_mcp_api_key: str = ""
 
