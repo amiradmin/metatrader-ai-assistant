@@ -8,6 +8,7 @@ from meta_trader_ai.market_context import (
     fomc_events,
     load_mt5_context,
     parse_bls_ics,
+    parse_bls_schedule_html,
     parse_fred_real_yield,
 )
 
@@ -36,6 +37,30 @@ END:VCALENDAR
     assert len(events) == 1
     assert events[0].name == "Employment Situation"
     assert events[0].impact == "HIGH"
+    assert events[0].time_utc == datetime(2026, 9, 4, 12, 30, tzinfo=UTC)
+
+
+def test_parse_bls_html_fallback_keeps_high_impact_release() -> None:
+    text = """
+    <table>
+      <tr><th>Date</th><th>Time</th><th>Release</th></tr>
+      <tr>
+        <td>Friday, September 4, 2026</td>
+        <td>08:30 AM</td>
+        <td>Employment Situation for August 2026</td>
+      </tr>
+      <tr>
+        <td>Friday, September 18, 2026</td>
+        <td>10:00 AM</td>
+        <td>State Employment and Unemployment (Monthly) for August 2026</td>
+      </tr>
+    </table>
+    """
+    events = parse_bls_schedule_html(text)
+    assert len(events) == 1
+    assert events[0].impact == "HIGH"
+    assert events[0].source == "BLS"
+    assert events[0].timing_quality == "OFFICIAL_HTML"
     assert events[0].time_utc == datetime(2026, 9, 4, 12, 30, tzinfo=UTC)
 
 
