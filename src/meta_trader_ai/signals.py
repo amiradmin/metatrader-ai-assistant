@@ -158,10 +158,12 @@ def _direction_and_confidence(
 def _tipranks_adjustment(
     action: Action,
     context: TipRanksContext | None,
-) -> tuple[int, list[str]]:
+) -> tuple[int, str, list[str]]:
     """Use TipRanks only as a small higher-timeframe confirmation layer."""
     if context is None:
-        return 0, ["TipRanks context unavailable or stale; no confidence adjustment."]
+        return 0, "UNAVAILABLE", [
+            "TipRanks context unavailable or stale; no confidence adjustment."
+        ]
 
     bias = 0
     components: list[str] = []
@@ -185,7 +187,9 @@ def _tipranks_adjustment(
 
     detail = ", ".join(components) if components else "no directional fields"
     if action is Action.WAIT or bias == 0:
-        return 0, [f"TipRanks context neutral for M15 decision ({detail})."]
+        return 0, "NEUTRAL", [
+            f"TipRanks context neutral for M15 decision ({detail})."
+        ]
 
     aligned = (action is Action.BUY and bias > 0) or (
         action is Action.SELL and bias < 0
@@ -193,7 +197,8 @@ def _tipranks_adjustment(
     magnitude = min(6, abs(bias))
     adjustment = magnitude if aligned else -magnitude
     direction = "confirmed" if aligned else "opposed"
-    return adjustment, [
+    status = "CONFIRM" if aligned else "OPPOSE"
+    return adjustment, status, [
         f"TipRanks higher-timeframe context {direction} M15 bias "
         f"({detail}); confidence adjustment={adjustment:+d}."
     ]
@@ -217,6 +222,8 @@ def build_hint(
         ]
     )
 
+    tipranks_status = "BYPASSED"
+    tipranks_adjustment = 0
     timeframe = snapshot.timeframe.upper()
     if timeframe not in M15_TIMEFRAMES:
         action = Action.WAIT
@@ -239,11 +246,13 @@ def build_hint(
         )
         reasons.extend(confidence_reasons)
 
-        adjustment, tipranks_reasons = _tipranks_adjustment(
+        tipranks_adjustment, tipranks_status, tipranks_reasons = _tipranks_adjustment(
             action,
             tipranks_context,
         )
-        confidence = int(round(_clamp(confidence + adjustment, 0.0, 100.0)))
+        confidence = int(
+            round(_clamp(confidence + tipranks_adjustment, 0.0, 100.0))
+        )
         reasons.extend(tipranks_reasons)
 
         if action in {Action.BUY, Action.SELL} and confidence < MIN_ACTION_CONFIDENCE:
@@ -270,6 +279,8 @@ def build_hint(
         confidence=confidence,
         technical_score=technical_score,
         news_risk=news_risk,
+        tipranks_status=tipranks_status,
+        tipranks_adjustment=tipranks_adjustment,
         reasons=reasons,
         relevant_news=relevant,
         max_risk_percent=max_risk_percent,
