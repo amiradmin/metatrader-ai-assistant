@@ -20,6 +20,18 @@ class Settings(BaseSettings):
     news_lookback_hours: int = 24
     high_impact_block_minutes: int = 30
 
+    economic_calendar_enabled: bool = True
+    forex_factory_calendar_url: str = (
+        "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    )
+    economic_calendar_cache_seconds: int = 300
+    economic_calendar_stale_fallback_minutes: int = 180
+    economic_calendar_high_before_minutes: int = 30
+    economic_calendar_high_after_minutes: int = 30
+    economic_calendar_medium_before_minutes: int = 15
+    economic_calendar_medium_after_minutes: int = 10
+    economic_calendar_fail_closed: bool = True
+
     tipranks_context_enabled: bool = True
     tipranks_context_path: Path = Path("data/tipranks_context.json")
     tipranks_context_max_age_minutes: int = 1500
