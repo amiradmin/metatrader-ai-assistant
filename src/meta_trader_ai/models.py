@@ -42,6 +42,18 @@ class NewsItem(BaseModel):
     impact_score: int = Field(default=0, ge=0, le=100)
 
 
+class TipRanksContext(BaseModel):
+    """Small external context payload supplied from the TipRanks connector."""
+
+    symbol: str
+    price: float = Field(gt=0)
+    change_percentage: float | None = None
+    price_avg_50: float | None = Field(default=None, gt=0)
+    price_avg_200: float | None = Field(default=None, gt=0)
+    updated_at: datetime
+    source: str = "TipRanks"
+
+
 class TradeHint(BaseModel):
     action: Action
     symbol: str
