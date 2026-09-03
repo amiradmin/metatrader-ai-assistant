@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "metatrader-ai-assistant"
-version = "0.1.0"
-description = "Read-only MT5 market bridge with explainable technical and news-aware hints"
+version = "0.3.0"
+description = "M15-first MT5 assistant with explainable signals, TipRanks context, and guarded execution modes"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -14,6 +14,7 @@ dependencies = [
   "pydantic-settings>=2.7,<3",
   "httpx>=0.28,<1",
   "feedparser>=6.0.11,<7",
+  "mcp>=1.26,<2",
 ]
 
 [project.optional-dependencies]
