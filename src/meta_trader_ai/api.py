@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 
 from meta_trader_ai.bridge import SnapshotError, load_snapshot
 from meta_trader_ai.config import settings
+from meta_trader_ai.market_structure import MarketStructureError, load_structure_context
 from meta_trader_ai.models import TipRanksContext, TradeHint
 from meta_trader_ai.news import collect_news
 from meta_trader_ai.signals import build_hint
@@ -127,6 +128,17 @@ async def hint() -> TradeHint:
     except SnapshotError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    market_structure_context = None
+    if settings.market_structure_enabled:
+        try:
+            market_structure_context = load_structure_context(
+                settings.mt5_context_path,
+                symbol=snapshot.symbol,
+                max_age_seconds=settings.max_context_age_seconds,
+            )
+        except MarketStructureError:
+            market_structure_context = None
+
     tipranks_context = None
     if settings.tipranks_context_enabled:
         try:
@@ -144,4 +156,5 @@ async def hint() -> TradeHint:
         news,
         settings.max_risk_percent,
         tipranks_context=tipranks_context,
+        market_structure_context=market_structure_context,
     )
