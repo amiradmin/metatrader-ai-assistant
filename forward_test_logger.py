@@ -81,7 +81,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8000/hint")
     parser.add_argument("--output", default="forward_journal.csv")
-    parser.add_argument("--interval", type=float, default=60.0)\n    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--interval", type=float, default=60.0)
+    parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
