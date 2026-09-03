@@ -1,6 +1,6 @@
 # MetaTrader AI Assistant
 
-A read-only-first MetaTrader 5 assistant for Ubuntu. MetaTrader runs under Wine, an MQL5 bridge exports market/account snapshots, and native Python 3.13 produces explainable M15-first technical + news-aware hints.
+A read-only-first MetaTrader 5 assistant for Ubuntu. MetaTrader runs under Wine, MQL5 bridges export market/account snapshots plus higher-timeframe context, and native Python 3.13 produces explainable M15-first technical + news-aware hints.
 
 ## Safety baseline
 
@@ -10,15 +10,18 @@ A read-only-first MetaTrader 5 assistant for Ubuntu. MetaTrader runs under Wine,
 - High-impact news can force a `WAIT` decision.
 - Credentials and broker passwords never leave MetaTrader and never belong in Git.
 - TipRanks is confirmation context only; it cannot create a trade direction by itself.
+- H1/H4 market structure is observational until backtest and forward-test evidence justifies weighting it.
 
 ## Architecture
 
 ```text
 MetaTrader 5 (Wine)
   -> read-only MQL5 M15 snapshot exporter
-  -> JSON file in MQL5/Files
+  -> read-only H1/H4 market-context exporter
+  -> JSON files in MQL5/Files
   -> Python 3.13 / FastAPI
   -> EMA9/EMA21 + RSI14 + ATR14 + momentum + spread
+  -> confirmed-swing HH/HL/LH/LL + BOS/CHOCH observer
   -> news-risk gate
   -> optional TipRanks higher-timeframe confirmation (max +/-6 confidence)
   -> dashboard / human confirmation
@@ -38,6 +41,31 @@ The baseline score combines:
 
 Confidence is dynamic. A directional hint must still meet the configured safety threshold before it can remain `BUY` or `SELL`; otherwise it is converted to `WAIT`.
 
+## H1/H4 market-structure observer
+
+`mt5/ReadOnlyMarketContextBridge.mq5` exports completed H1 and H4 OHLC arrays. Python then identifies confirmed fractal swing highs/lows and derives:
+
+- bullish `HH_HL` structure
+- bearish `LH_LL` structure
+- mixed/range structure
+- `BOS_UP` / `BOS_DOWN`
+- `CHOCH_UP` / `CHOCH_DOWN`
+- H1/H4 agreement with the current M15 directional bias
+
+Swing points require candles on both sides, so the detector uses confirmed structure rather than repainting the newest bar. BOS/CHOCH is emitted only when the latest completed close crosses a confirmed swing level after the previous completed close had not crossed it.
+
+The observer currently contributes **zero confidence points**. Its status is exposed as `CONFIRM`, `OPPOSE`, `MIXED`, or `OBSERVE` so we can measure whether it improves expectancy before allowing it to affect live/demo decisions.
+
+Configure the local higher-timeframe JSON path in `.env`:
+
+```bash
+MT5_CONTEXT_PATH=/home/amir/.mt5/drive_c/users/amir/AppData/Roaming/MetaQuotes/Terminal/REPLACE_WITH_TERMINAL_ID/MQL5/Files/mt5_context.json
+MAX_CONTEXT_AGE_SECONDS=90
+MARKET_STRUCTURE_ENABLED=true
+```
+
+Attach `ReadOnlyMarketContextBridge` to one MT5 chart with the same symbol used by `ReadOnlySnapshotBridge`. The signal panel will then show H1 trend/structure/event, H4 trend/structure/event, and the MTF observer status.
+
 ## News inputs
 
 The news layer supports configurable RSS feeds and is seeded for official sources such as the Federal Reserve, US Bureau of Labor Statistics, and US EIA. Optional licensed providers can be added later for Reuters-grade headlines and structured economic calendars.
@@ -45,6 +73,7 @@ The news layer supports configurable RSS feeds and is seeded for official source
 Each hint contains:
 - action: BUY, SELL, or WAIT
 - technical score and reasons
+- H1/H4 market structure and MTF observer status
 - relevant headlines and affected currencies
 - news-risk level
 - confidence and risk budget
@@ -96,6 +125,8 @@ Open `http://127.0.0.1:8000/docs`.
 
 Compile `mt5/ReadOnlySnapshotBridge.mq5` in MetaEditor and attach it to one chart. It contains no trading functions. Its default timeframe is `PERIOD_M15` and it exports completed OHLC candles plus the live bid/ask spread. Set `MT5_SNAPSHOT_PATH` in `.env` to the generated `mt5_snapshot.json` file.
 
+For higher-timeframe structure, also compile and attach `mt5/ReadOnlyMarketContextBridge.mq5`. It exports 100 completed H1 and H4 candles by default to `mt5_context.json`. Set `MT5_CONTEXT_PATH` in `.env` to that generated file.
+
 ## MT5 read-only signal panel
 
 `mt5/ReadOnlySignalPanel.mq5` displays the local API decision directly on an MT5 chart. It contains no order-placement or order-modification functions.
@@ -105,9 +136,10 @@ Compile `mt5/ReadOnlySnapshotBridge.mq5` in MetaEditor and attach it to one char
 3. Enable "Allow WebRequest for listed URL" and add `http://127.0.0.1:8000`.
 4. Keep the Python API running.
 5. Attach `ReadOnlySignalPanel` to the chart.
-6. Keep global Algo Trading disabled during development.
+6. Attach `ReadOnlyMarketContextBridge` so H1/H4 structure is available.
+7. Keep global Algo Trading disabled during development.
 
-The panel displays connection status, symbol, WAIT/BUY/SELL decision, confidence, technical score, news risk, UTC generation time, and read-only guidance. A directional bias is never an instruction or guarantee, and manual validation remains required.
+The panel displays connection status, symbol, WAIT/BUY/SELL decision, confidence, technical score, H1/H4 market structure, MTF observer status, news risk, TipRanks context, UTC generation time, and read-only guidance. A directional bias is never an instruction or guarantee, and manual validation remains required.
 
 ## Export M15 history for backtesting
 
