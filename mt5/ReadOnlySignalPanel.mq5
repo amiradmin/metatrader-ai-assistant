@@ -1,6 +1,8 @@
 #property strict
 #property description "Readable read-only API signal panel. Contains no order functions."
 
+#include <Canvas\Canvas.mqh>
+
 input string ApiUrl = "http://127.0.0.1:8000/hint";
 input int RefreshSeconds = 60;
 input int RequestTimeoutMs = 45000;
@@ -9,11 +11,14 @@ input int PanelHeight = 330;
 input int PanelFontSize = 14;
 input int PanelLeft = 20;
 input int PanelTop = 170;
+input int PanelOpacityPercent = 75;
 
 string Prefix = "ReadOnlySignalPanel_";
 color CurrentActionColor = clrGold;
 bool BlinkVisible = true;
 ulong LastApiRefreshMs = 0;
+CCanvas PanelCanvas;
+bool PanelCanvasReady = false;
 
 string JsonValue(const string json, const string key)
 {
@@ -57,21 +62,39 @@ string JsonValue(const string json, const string key)
 void CreateBackground()
 {
    string name = Prefix + "Background";
-   if(ObjectFind(0, name) < 0)
-      ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   if(!PanelCanvasReady)
+   {
+      if(ObjectFind(0, name) >= 0)
+         ObjectDelete(0, name);
 
-   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, PanelLeft);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, PanelTop);
-   ObjectSetInteger(0, name, OBJPROP_XSIZE, PanelWidth);
-   ObjectSetInteger(0, name, OBJPROP_YSIZE, PanelHeight);
-   // MT5 rectangle labels do not expose an alpha channel. Drawing the panel
-   // behind price candles gives the stable visual equivalent of a 50% overlay.
-   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, C'20,24,31');
-   ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, C'80,90,105');
-   ObjectSetInteger(0, name, OBJPROP_BACK, true);
-   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+      PanelCanvasReady = PanelCanvas.CreateBitmapLabel(
+         0,
+         0,
+         name,
+         PanelLeft,
+         PanelTop,
+         PanelWidth,
+         PanelHeight,
+         COLOR_FORMAT_ARGB_NORMALIZE
+      );
+      if(!PanelCanvasReady)
+      {
+         Print("ReadOnlySignalPanel could not create the alpha background: ", GetLastError());
+         return;
+      }
+   }
+
+   int opacity = MathMax(0, MathMin(100, PanelOpacityPercent));
+   uchar alpha = (uchar)MathRound(255.0 * opacity / 100.0);
+   PanelCanvas.Erase(ColorToARGB(C'20,24,31', alpha));
+   PanelCanvas.Rectangle(
+      0,
+      0,
+      PanelWidth - 1,
+      PanelHeight - 1,
+      ColorToARGB(C'80,90,105', alpha)
+   );
+   PanelCanvas.Update();
 }
 
 void SetLine(
@@ -141,7 +164,13 @@ void ShowPanel(
 
 void DeletePanel()
 {
-   ObjectDelete(0, Prefix + "Background");
+   if(PanelCanvasReady)
+   {
+      PanelCanvas.Destroy();
+      PanelCanvasReady = false;
+   }
+   else
+      ObjectDelete(0, Prefix + "Background");
    ObjectDelete(0, Prefix + "Hello");
    ObjectDelete(0, Prefix + "Title");
    ObjectDelete(0, Prefix + "Status");
@@ -243,7 +272,7 @@ bool RefreshHint()
 
 int OnInit()
 {
-   if(RefreshSeconds < 5 || RequestTimeoutMs < 1000)
+   if(RefreshSeconds < 5 || RequestTimeoutMs < 1000 || PanelOpacityPercent < 0 || PanelOpacityPercent > 100)
       return INIT_PARAMETERS_INCORRECT;
 
    EventSetMillisecondTimer(500);
