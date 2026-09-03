@@ -62,6 +62,13 @@ class TradeHint(BaseModel):
     news_risk: NewsRisk
     tipranks_status: str = "UNAVAILABLE"
     tipranks_adjustment: int = Field(default=0, ge=-6, le=6)
+    mtf_status: str = "UNAVAILABLE"
+    h1_trend: str = "UNAVAILABLE"
+    h1_structure: str = "UNAVAILABLE"
+    h1_structure_event: str = "NONE"
+    h4_trend: str = "UNAVAILABLE"
+    h4_structure: str = "UNAVAILABLE"
+    h4_structure_event: str = "NONE"
     reasons: list[str]
     relevant_news: list[NewsItem]
     max_risk_percent: float
