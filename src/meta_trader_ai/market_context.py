@@ -28,7 +28,22 @@ from meta_trader_ai.regime import classify_regime
 
 FRED_REAL_YIELD_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFII10"
 BLS_CALENDAR_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
+PROJECT_URL = "https://github.com/amiradmin/metatrader-ai-assistant"
 NEW_YORK = ZoneInfo("America/New_York")
+
+# BLS may block anonymous-looking automated retrieval. Keep requests slow and
+# identify this read-only research client with a stable project URL.
+BLS_REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "Chrome/151.0 Safari/537.36 "
+        f"MetaTraderAIAssistant/0.3 (+{PROJECT_URL})"
+    ),
+    "Accept": "text/calendar,text/plain;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.bls.gov/schedule/",
+    "Cache-Control": "no-cache",
+}
 
 # Official FOMC meeting dates published by the Federal Reserve. The statement
 # has historically been released at 14:00 ET on the final meeting day. Because
@@ -382,7 +397,12 @@ class MarketContextCollector:
             FRED_REAL_YIELD_URL,
             timeout=self.timeout_seconds,
             follow_redirects=True,
-            headers={"User-Agent": "metatrader-ai-assistant/0.3 read-only research"},
+            headers={
+                "User-Agent": (
+                    "MetaTraderAIAssistant/0.3 read-only research "
+                    f"(+{PROJECT_URL})"
+                )
+            },
         )
         response.raise_for_status()
         value, change_bp, day = parse_fred_real_yield(response.text)
@@ -401,10 +421,12 @@ class MarketContextCollector:
             BLS_CALENDAR_URL,
             timeout=self.timeout_seconds,
             follow_redirects=True,
-            headers={"User-Agent": "metatrader-ai-assistant/0.3 read-only research"},
+            headers=BLS_REQUEST_HEADERS,
         )
         response.raise_for_status()
         events = parse_bls_ics(response.text)
+        if not events:
+            raise ValueError("BLS calendar returned no relevant timed releases")
         self._cache["bls_events"] = [_event_to_dict(event) for event in events]
         self._cache["bls_fetched_at"] = now.isoformat()
         self._save_cache()
