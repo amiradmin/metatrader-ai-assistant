@@ -1,8 +1,8 @@
 """Economic-calendar ingestion for scheduled macro-event risk.
 
-Forex Factory exposes a weekly JSON export from its calendar page.  This module
+Forex Factory exposes a weekly JSON export from its calendar page. This module
 uses that export only as a scheduled-event risk gate: it never creates trade
-direction.  High-impact events can block new entries around the release window;
+direction. High-impact events can block new entries around the release window;
 medium-impact events can reduce confidence through the existing news-risk layer.
 """
 
@@ -12,7 +12,6 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import httpx
 
@@ -45,7 +44,14 @@ class _CalendarCache:
     fetched_at: datetime
 
 
+@dataclass(slots=True)
+class _CalendarFailure:
+    reason: str
+    failed_at: datetime
+
+
 _cache: dict[str, _CalendarCache] = {}
+_failures: dict[str, _CalendarFailure] = {}
 _cache_lock = asyncio.Lock()
 
 
@@ -96,21 +102,43 @@ def parse_calendar_payload(payload: object) -> list[CalendarEvent]:
     return events
 
 
+def _failure_reason(exc: Exception, url: str) -> str:
+    """Return a useful error even for exceptions such as ReadTimeout with empty str()."""
+    detail = str(exc).strip()
+    name = type(exc).__name__
+    if detail:
+        return f"{name}: {detail} [{url}]"
+    return f"{name} while requesting {url}"
+
+
 async def fetch_calendar_events(
     url: str,
     *,
     cache_seconds: int = 300,
     stale_fallback_minutes: int = 180,
+    request_timeout_seconds: float = 25.0,
+    failure_cooldown_seconds: int = 60,
+    max_attempts: int = 2,
 ) -> list[CalendarEvent]:
     """Fetch and cache the weekly calendar export.
 
-    A short cache avoids hitting the provider on every MT5 /hint poll.  If a
-    refresh temporarily fails, a recent last-known-good calendar may be used.
+    A short success cache avoids hitting the provider on every MT5 /hint poll.
+    A failure cooldown prevents a temporary provider/network outage from making
+    every 15-second AutoTrader poll wait on the same failed network request.
+    A recent last-known-good calendar remains usable for a bounded period.
     """
     now = datetime.now(UTC)
     cached = _cache.get(url)
     if cached and (now - cached.fetched_at).total_seconds() <= cache_seconds:
         return list(cached.events)
+
+    failure = _failures.get(url)
+    if failure and (now - failure.failed_at).total_seconds() <= failure_cooldown_seconds:
+        if cached:
+            age_minutes = (now - cached.fetched_at).total_seconds() / 60.0
+            if age_minutes <= stale_fallback_minutes:
+                return list(cached.events)
+        raise EconomicCalendarError(failure.reason)
 
     async with _cache_lock:
         now = datetime.now(UTC)
@@ -118,29 +146,58 @@ async def fetch_calendar_events(
         if cached and (now - cached.fetched_at).total_seconds() <= cache_seconds:
             return list(cached.events)
 
-        try:
-            async with httpx.AsyncClient(
-                timeout=12,
-                headers={"User-Agent": "MT5-AI-Assistant/0.4"},
-            ) as client:
-                response = await client.get(url, follow_redirects=True)
-                response.raise_for_status()
-                events = parse_calendar_payload(response.json())
-        except (httpx.HTTPError, ValueError, EconomicCalendarError) as exc:
-            cached = _cache.get(url)
+        failure = _failures.get(url)
+        if failure and (now - failure.failed_at).total_seconds() <= failure_cooldown_seconds:
             if cached:
                 age_minutes = (now - cached.fetched_at).total_seconds() / 60.0
                 if age_minutes <= stale_fallback_minutes:
-                    logger.warning(
-                        "Economic calendar refresh failed; using %.1f-minute-old cache: %s",
-                        age_minutes,
-                        exc,
-                    )
                     return list(cached.events)
-            raise EconomicCalendarError(f"economic calendar unavailable: {exc}") from exc
+            raise EconomicCalendarError(failure.reason)
 
-        _cache[url] = _CalendarCache(events=list(events), fetched_at=now)
-        return events
+        last_exc: Exception | None = None
+        attempts = max(1, max_attempts)
+        timeout = httpx.Timeout(
+            max(1.0, float(request_timeout_seconds)),
+            connect=min(10.0, max(1.0, float(request_timeout_seconds))),
+        )
+
+        for attempt in range(1, attempts + 1):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=timeout,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 MT5-AI-Assistant/0.4",
+                        "Accept": "application/json,text/plain,*/*",
+                    },
+                ) as client:
+                    response = await client.get(url, follow_redirects=True)
+                    response.raise_for_status()
+                    events = parse_calendar_payload(response.json())
+
+                _cache[url] = _CalendarCache(events=list(events), fetched_at=now)
+                _failures.pop(url, None)
+                return events
+            except (httpx.HTTPError, ValueError, EconomicCalendarError) as exc:
+                last_exc = exc
+                if attempt < attempts:
+                    await asyncio.sleep(0.75 * attempt)
+
+        assert last_exc is not None
+        reason = _failure_reason(last_exc, url)
+        _failures[url] = _CalendarFailure(reason=reason, failed_at=now)
+
+        cached = _cache.get(url)
+        if cached:
+            age_minutes = (now - cached.fetched_at).total_seconds() / 60.0
+            if age_minutes <= stale_fallback_minutes:
+                logger.warning(
+                    "Economic calendar refresh failed; using %.1f-minute-old cache: %s",
+                    age_minutes,
+                    reason,
+                )
+                return list(cached.events)
+
+        raise EconomicCalendarError(f"economic calendar unavailable: {reason}") from last_exc
 
 
 def _symbol_currencies(symbol: str) -> set[str]:
@@ -235,6 +292,9 @@ async def collect_calendar_news(
     *,
     cache_seconds: int = 300,
     stale_fallback_minutes: int = 180,
+    request_timeout_seconds: float = 25.0,
+    failure_cooldown_seconds: int = 60,
+    max_attempts: int = 2,
     high_before_minutes: int = 30,
     high_after_minutes: int = 30,
     medium_before_minutes: int = 15,
@@ -245,6 +305,9 @@ async def collect_calendar_news(
         url,
         cache_seconds=cache_seconds,
         stale_fallback_minutes=stale_fallback_minutes,
+        request_timeout_seconds=request_timeout_seconds,
+        failure_cooldown_seconds=failure_cooldown_seconds,
+        max_attempts=max_attempts,
     )
     return calendar_news_items(
         symbol,
