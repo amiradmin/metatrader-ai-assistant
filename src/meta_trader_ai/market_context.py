@@ -203,9 +203,23 @@ def _parse_ics_datetime(left: str, raw_value: str) -> datetime | None:
 
     try:
         if value.endswith("Z"):
-            return datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
-        parsed = datetime.strptime(value, "%Y%m%dT%H%M%S")
-        tz_name = params.get("TZID", "America/New_York")
+            for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%dT%H%MZ"):
+                try:
+                    return datetime.strptime(value, fmt).replace(tzinfo=UTC)
+                except ValueError:
+                    continue
+            return None
+
+        parsed = None
+        for fmt in ("%Y%m%dT%H%M%S", "%Y%m%dT%H%M"):
+            try:
+                parsed = datetime.strptime(value, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            return None
+        tz_name = params.get("TZID", "America/New_York").strip('"')
         return parsed.replace(tzinfo=ZoneInfo(tz_name)).astimezone(UTC)
     except (ValueError, KeyError):
         return None
@@ -230,7 +244,7 @@ def _impact_for_bls(name: str) -> str | None:
 
 
 def parse_bls_ics(text: str) -> list[EconomicEvent]:
-    """Parse relevant future-market BLS releases from the official ICS calendar."""
+    """Parse relevant market-moving BLS releases from the official ICS calendar."""
     events: list[EconomicEvent] = []
     current: dict[str, tuple[str, str]] | None = None
 
@@ -287,7 +301,7 @@ def parse_fred_real_yield(text: str) -> tuple[float, float | None, str]:
     values: list[tuple[str, float]] = []
     for row in csv.DictReader(io.StringIO(text)):
         raw = str(row.get("DFII10", "")).strip()
-        day = str(row.get("DATE", "")).strip()
+        day = str(row.get("DATE") or row.get("observation_date") or "").strip()
         if not raw or raw == "." or not day:
             continue
         try:
