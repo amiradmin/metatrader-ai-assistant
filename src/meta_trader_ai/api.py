@@ -88,7 +88,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MetaTrader AI Assistant",
-    version="0.4.0",
+    version="0.4.1",
     lifespan=lifespan,
 )
 
@@ -164,7 +164,7 @@ async def hint() -> TradeHint:
             tipranks_context = None
 
     # RSS headlines and the scheduled economic calendar are separate inputs but
-    # intentionally converge on the same NewsRisk gate.  That means the MT5
+    # intentionally converge on the same NewsRisk gate. That means the MT5
     # panel and DemoAutoTrader do not need a second order-path implementation:
     # an active high-impact calendar window simply becomes NewsRisk.HIGH.
     news = await collect_news(settings.rss_urls, settings.news_lookback_hours)
@@ -178,6 +178,13 @@ async def hint() -> TradeHint:
                 stale_fallback_minutes=(
                     settings.economic_calendar_stale_fallback_minutes
                 ),
+                request_timeout_seconds=(
+                    settings.economic_calendar_request_timeout_seconds
+                ),
+                failure_cooldown_seconds=(
+                    settings.economic_calendar_failure_cooldown_seconds
+                ),
+                max_attempts=settings.economic_calendar_max_attempts,
                 high_before_minutes=(
                     settings.economic_calendar_high_before_minutes
                 ),
