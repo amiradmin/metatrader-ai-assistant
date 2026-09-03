@@ -27,6 +27,9 @@ class MarketSnapshot(BaseModel):
     balance: float
     equity: float
     positions_total: int = 0
+    opens: list[float] = Field(default_factory=list)
+    highs: list[float] = Field(default_factory=list)
+    lows: list[float] = Field(default_factory=list)
     closes: list[float] = Field(min_length=20)
 
 
