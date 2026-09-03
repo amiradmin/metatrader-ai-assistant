@@ -2,7 +2,9 @@ import csv
 from pathlib import Path
 
 from meta_trader_ai.kpi_report import (
+    bootstrap_expectancy_ci,
     evidence_stage,
+    load_shadow_r_values,
     load_shadow_trades,
     metrics_from_r,
 )
@@ -31,10 +33,26 @@ def test_shadow_loader_uses_only_close_events(tmp_path: Path) -> None:
         writer.writerow({"event": "OPEN", "pnl_r": ""})
         writer.writerow({"event": "CLOSE", "pnl_r": "-1.0"})
 
+    values = load_shadow_r_values(path)
     metrics = load_shadow_trades(path)
+    assert values == [2.0, -1.0]
     assert metrics.trades == 2
     assert metrics.net_r == 1.0
     assert metrics.expectancy_r == 0.5
+
+
+def test_bootstrap_expectancy_is_deterministic_and_contains_mean() -> None:
+    values = [2.0, -1.0, 2.0, -1.0, 2.0, -1.0, 2.0, -1.0, 2.0, -1.0]
+    first = bootstrap_expectancy_ci(values, samples=1000, seed=123)
+    second = bootstrap_expectancy_ci(values, samples=1000, seed=123)
+    assert first == second
+    assert first is not None
+    lower, upper = first
+    assert lower <= 0.5 <= upper
+
+
+def test_bootstrap_waits_for_minimum_forward_sample() -> None:
+    assert bootstrap_expectancy_ci([2.0, -1.0, 2.0, -1.0]) is None
 
 
 def test_evidence_stage_boundaries() -> None:
