@@ -1,5 +1,5 @@
 #property strict
-#property description "Read-only snapshot exporter. Contains no order functions."
+#property description "Read-only M15-first snapshot exporter. Contains no order functions."
 
 input string InputSymbol = "EURUSD";
 input ENUM_TIMEFRAMES InputTimeframe = PERIOD_M15;
@@ -29,9 +29,30 @@ string UtcIsoTimestamp()
    );
 }
 
+string RatesField(MqlRates &rates[], int copied, string field, int digits)
+{
+   string json = "\"" + field + "\":[";
+   for(int i=copied-1; i>=0; i--)
+   {
+      double value = rates[i].close;
+      if(field == "opens")
+         value = rates[i].open;
+      else if(field == "highs")
+         value = rates[i].high;
+      else if(field == "lows")
+         value = rates[i].low;
+
+      json += DoubleToString(value, digits);
+      if(i > 0)
+         json += ",";
+   }
+   json += "]";
+   return json;
+}
+
 int OnInit()
 {
-   if(InputBars < 20)
+   if(InputBars < 21)
       return INIT_PARAMETERS_INCORRECT;
    SymbolSelect(InputSymbol, true);
    EventSetTimer((int)MathMax(1, InputIntervalSeconds));
@@ -49,10 +70,10 @@ void OnTimer()
    if(!SymbolInfoTick(InputSymbol, tick))
       return;
 
-   double closes[];
-   ArraySetAsSeries(closes, true);
-   int copied = CopyClose(InputSymbol, InputTimeframe, 0, InputBars, closes);
-   if(copied < 20)
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int copied = CopyRates(InputSymbol, InputTimeframe, 0, InputBars, rates);
+   if(copied < 21)
       return;
 
    int handle = FileOpen(OutputFile, FILE_WRITE|FILE_TXT|FILE_ANSI);
@@ -69,14 +90,11 @@ void OnTimer()
    json += "\"balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + ",";
    json += "\"equity\":" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + ",";
    json += "\"positions_total\":" + IntegerToString(PositionsTotal()) + ",";
-   json += "\"closes\":[";
-   for(int i=copied-1; i>=0; i--)
-   {
-      json += DoubleToString(closes[i], digits);
-      if(i > 0)
-         json += ",";
-   }
-   json += "]}";
+   json += RatesField(rates, copied, "opens", digits) + ",";
+   json += RatesField(rates, copied, "highs", digits) + ",";
+   json += RatesField(rates, copied, "lows", digits) + ",";
+   json += RatesField(rates, copied, "closes", digits);
+   json += "}";
 
    FileWriteString(handle, json);
    FileClose(handle);
