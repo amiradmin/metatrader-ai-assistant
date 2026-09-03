@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     app_env: str = "development"
     mt5_snapshot_path: Path = Path("data/mt5_snapshot.json")
     max_snapshot_age_seconds: int = 20
+    mt5_context_path: Path = Path("data/mt5_context.json")
+    max_context_age_seconds: int = 90
+    market_structure_enabled: bool = True
     max_risk_percent: float = 0.5
     news_lookback_hours: int = 24
     high_impact_block_minutes: int = 30
