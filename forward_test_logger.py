@@ -47,12 +47,27 @@ def journal_row(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
-def existing_keys(path: Path) -> set[tuple[str, str, str]]:
+def signal_bucket(value: object) -> str:
+    """Return the UTC M15 candle bucket for an ISO-8601 signal timestamp."""
+    raw = str(value)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return raw
+    bucket = parsed.replace(
+        minute=(parsed.minute // 15) * 15,
+        second=0,
+        microsecond=0,
+    )
+    return bucket.isoformat()
+
+
+def existing_keys(path: Path) -> set[tuple[str, str]]:
     if not path.exists() or path.stat().st_size == 0:
         return set()
     with path.open(newline="", encoding="utf-8") as handle:
         return {
-            (row["signal_generated_at"], row["symbol"], row["action"])
+            (signal_bucket(row["signal_generated_at"]), row["symbol"])
             for row in csv.DictReader(handle)
         }
 
@@ -60,9 +75,9 @@ def existing_keys(path: Path) -> set[tuple[str, str, str]]:
 def append_once(
     path: Path,
     row: dict[str, object],
-    seen: set[tuple[str, str, str]],
+    seen: set[tuple[str, str]],
 ) -> bool:
-    key = (str(row["signal_generated_at"]), str(row["symbol"]), str(row["action"]))
+    key = (signal_bucket(row["signal_generated_at"]), str(row["symbol"]))
     if not key[0] or key in seen:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
