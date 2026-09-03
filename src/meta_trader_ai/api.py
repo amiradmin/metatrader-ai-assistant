@@ -8,6 +8,11 @@ from fastapi import FastAPI, HTTPException
 
 from meta_trader_ai.bridge import SnapshotError, load_snapshot
 from meta_trader_ai.config import settings
+from meta_trader_ai.economic_calendar import (
+    EconomicCalendarError,
+    collect_calendar_news,
+    fail_closed_guard,
+)
 from meta_trader_ai.market_structure import MarketStructureError, load_structure_context
 from meta_trader_ai.models import TipRanksContext, TradeHint
 from meta_trader_ai.news import collect_news
@@ -83,7 +88,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MetaTrader AI Assistant",
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -93,6 +98,14 @@ def health() -> dict[str, str]:
     return {
         "status": "ok",
         "mode": "guarded",
+        "economic_calendar": (
+            "enabled-fail-closed"
+            if settings.economic_calendar_enabled
+            and settings.economic_calendar_fail_closed
+            else "enabled"
+            if settings.economic_calendar_enabled
+            else "disabled"
+        ),
         "tipranks_auto_refresh": (
             "enabled"
             if settings.tipranks_auto_refresh_enabled
@@ -150,7 +163,40 @@ async def hint() -> TradeHint:
         except TipRanksContextError:
             tipranks_context = None
 
+    # RSS headlines and the scheduled economic calendar are separate inputs but
+    # intentionally converge on the same NewsRisk gate.  That means the MT5
+    # panel and DemoAutoTrader do not need a second order-path implementation:
+    # an active high-impact calendar window simply becomes NewsRisk.HIGH.
     news = await collect_news(settings.rss_urls, settings.news_lookback_hours)
+
+    if settings.economic_calendar_enabled:
+        try:
+            calendar_news = await collect_calendar_news(
+                snapshot.symbol,
+                settings.forex_factory_calendar_url,
+                cache_seconds=settings.economic_calendar_cache_seconds,
+                stale_fallback_minutes=(
+                    settings.economic_calendar_stale_fallback_minutes
+                ),
+                high_before_minutes=(
+                    settings.economic_calendar_high_before_minutes
+                ),
+                high_after_minutes=(
+                    settings.economic_calendar_high_after_minutes
+                ),
+                medium_before_minutes=(
+                    settings.economic_calendar_medium_before_minutes
+                ),
+                medium_after_minutes=(
+                    settings.economic_calendar_medium_after_minutes
+                ),
+            )
+            news.extend(calendar_news)
+        except EconomicCalendarError as exc:
+            logger.warning("Economic calendar check failed: %s", exc)
+            if settings.economic_calendar_fail_closed:
+                news.append(fail_closed_guard(snapshot.symbol, str(exc)))
+
     return build_hint(
         snapshot,
         news,
