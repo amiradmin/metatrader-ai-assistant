@@ -1,8 +1,9 @@
 """Create a compact project KPI scorecard from historical and shadow-forward results.
 
 Primary KPI: expectancy in R per closed trade. Supporting KPIs are win rate,
-profit factor, net R, max drawdown, and forward sample size. The report keeps
-historical evidence separate from truly unseen shadow-forward evidence.
+profit factor, net R, max drawdown, forward sample size, and a deterministic
+bootstrap confidence interval for forward expectancy. Historical evidence is
+kept separate from truly unseen shadow-forward evidence.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import random
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -61,6 +63,43 @@ def metrics_from_r(values: list[float]) -> KpiMetrics:
     )
 
 
+def bootstrap_expectancy_ci(
+    values: list[float],
+    *,
+    samples: int = 5000,
+    confidence: float = 0.95,
+    seed: int = 260903,
+    min_trades: int = 5,
+) -> tuple[float, float] | None:
+    """Non-parametric bootstrap CI for mean R/trade.
+
+    The interval is intentionally deterministic for repeatable KPI reports.
+    It is withheld for very tiny samples because a numerical interval from only
+    a couple of trades would look more informative than it really is.
+    """
+    if len(values) < min_trades:
+        return None
+    if samples < 100:
+        raise ValueError("bootstrap samples must be at least 100")
+    if not 0.50 < confidence < 1.0:
+        raise ValueError("bootstrap confidence must be between 0.50 and 1.0")
+
+    rng = random.Random(seed)
+    size = len(values)
+    means: list[float] = []
+    for _ in range(samples):
+        total = 0.0
+        for _ in range(size):
+            total += values[rng.randrange(size)]
+        means.append(total / size)
+    means.sort()
+
+    alpha = (1.0 - confidence) / 2.0
+    lower_index = max(0, min(samples - 1, int(alpha * samples)))
+    upper_index = max(0, min(samples - 1, int((1.0 - alpha) * samples) - 1))
+    return means[lower_index], means[upper_index]
+
+
 def load_backtest_journal(path: Path) -> KpiMetrics | None:
     """Load original backtest trade outcomes when the local journal exists."""
     if not path.exists():
@@ -104,10 +143,10 @@ def load_frozen_candidate(
     return None
 
 
-def load_shadow_trades(path: Path) -> KpiMetrics:
-    """Use only CLOSED shadow trades; OPEN rows are not outcomes yet."""
+def load_shadow_r_values(path: Path) -> list[float]:
+    """Return only CLOSED shadow trade outcomes in chronological file order."""
     if not path.exists():
-        return metrics_from_r([])
+        return []
     values: list[float] = []
     with path.open("r", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
@@ -116,7 +155,12 @@ def load_shadow_trades(path: Path) -> KpiMetrics:
             raw = row.get("pnl_r", "").strip()
             if raw:
                 values.append(float(raw))
-    return metrics_from_r(values)
+    return values
+
+
+def load_shadow_trades(path: Path) -> KpiMetrics:
+    """Use only CLOSED shadow trades; OPEN rows are not outcomes yet."""
+    return metrics_from_r(load_shadow_r_values(path))
 
 
 def evidence_stage(trades: int) -> str:
@@ -163,6 +207,8 @@ def render_report(
     candidate: KpiMetrics | None,
     forward: KpiMetrics,
     reward_risk: float,
+    forward_expectancy_ci: tuple[float, float] | None = None,
+    bootstrap_confidence: float = 0.95,
 ) -> str:
     breakeven_wr = 100.0 / (1.0 + reward_risk)
     lines = [
@@ -203,6 +249,21 @@ def render_report(
             f"Evidence stage: {evidence_stage(forward.trades)}",
         ]
     )
+
+    if forward_expectancy_ci is not None:
+        level = bootstrap_confidence * 100.0
+        lines.append(
+            f"Bootstrap {level:.0f}% expectancy CI: "
+            f"[{forward_expectancy_ci[0]:+.3f}R, {forward_expectancy_ci[1]:+.3f}R]"
+        )
+        if forward_expectancy_ci[0] > 0.0:
+            lines.append("Bootstrap read: interval is entirely above 0R so far (still sample-size dependent).")
+        elif forward_expectancy_ci[1] < 0.0:
+            lines.append("Bootstrap read: interval is entirely below 0R so far (forward edge not confirmed).")
+        else:
+            lines.append("Bootstrap read: interval crosses 0R; current forward edge is statistically uncertain.")
+    elif forward.trades > 0:
+        lines.append("Bootstrap expectancy CI: waiting for at least 5 closed forward trades.")
 
     if forward.trades == 0:
         lines.append("Status: COLLECT DATA - no closed forward trades yet.")
@@ -271,6 +332,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--history", type=Path, default=Path("data/kpi_history.csv"))
     parser.add_argument("--report", type=Path, default=Path("data/kpi_latest.txt"))
     parser.add_argument("--reward-risk", type=float, default=2.0)
+    parser.add_argument("--bootstrap-samples", type=int, default=5000)
+    parser.add_argument("--bootstrap-confidence", type=float, default=0.95)
+    parser.add_argument("--bootstrap-seed", type=int, default=260903)
     return parser
 
 
@@ -281,12 +345,21 @@ def main() -> None:
 
     baseline = load_backtest_journal(args.baseline)
     candidate = load_frozen_candidate(args.candidate)
-    forward = load_shadow_trades(args.shadow)
+    forward_values = load_shadow_r_values(args.shadow)
+    forward = metrics_from_r(forward_values)
+    forward_ci = bootstrap_expectancy_ci(
+        forward_values,
+        samples=args.bootstrap_samples,
+        confidence=args.bootstrap_confidence,
+        seed=args.bootstrap_seed,
+    )
     report = render_report(
         baseline=baseline,
         candidate=candidate,
         forward=forward,
         reward_risk=args.reward_risk,
+        forward_expectancy_ci=forward_ci,
+        bootstrap_confidence=args.bootstrap_confidence,
     )
     print(report, end="")
     args.report.parent.mkdir(parents=True, exist_ok=True)
