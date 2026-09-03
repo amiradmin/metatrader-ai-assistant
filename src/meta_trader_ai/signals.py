@@ -6,6 +6,9 @@ from meta_trader_ai.models import Action, MarketSnapshot, NewsItem, NewsRisk, Tr
 from meta_trader_ai.news import risk_for_symbol
 
 
+MIN_ACTION_CONFIDENCE = 70
+
+
 def _sma(values: list[float], period: int) -> float:
     return sum(values[-period:]) / period
 
@@ -40,6 +43,13 @@ def build_hint(
     else:
         action = Action.WAIT
         confidence = 50
+
+    if action in {Action.BUY, Action.SELL} and confidence < MIN_ACTION_CONFIDENCE:
+        reasons.append(
+            f"Confidence {confidence} is below safety threshold "
+            f"{MIN_ACTION_CONFIDENCE}; action changed to WAIT."
+        )
+        action = Action.WAIT
 
     currencies = {snapshot.symbol[:3].upper(), snapshot.symbol[3:6].upper()}
     relevant = sorted(
