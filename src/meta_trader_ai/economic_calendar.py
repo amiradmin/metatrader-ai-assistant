@@ -9,6 +9,7 @@ medium-impact events can reduce confidence through the existing news-risk layer.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -112,13 +113,56 @@ def _failure_reason(exc: Exception, url: str) -> str:
 
 
 def _trust_env_for_attempt(attempt: int) -> bool:
-    """Use normal proxy/env routing first, then retry with a direct connection.
-
-    This matters on developer machines where curl can reach the feed directly
-    but a stale HTTP(S)_PROXY environment variable makes httpx connect to an
-    unreachable proxy. The safety gate stays fail-closed if both paths fail.
-    """
+    """Use normal proxy/env routing first, then retry with a direct connection."""
     return attempt == 1
+
+
+async def _fetch_with_curl(url: str, timeout_seconds: float) -> list[CalendarEvent]:
+    """Use the host curl binary as a final network fallback.
+
+    Some Linux/VPN combinations allow curl to reach the calendar while Python's
+    httpx connection path times out. The subprocess is argv-only (no shell) and
+    forces IPv4 because this failure is commonly caused by an unusable IPv6 route.
+    """
+    timeout = max(5, int(round(timeout_seconds)))
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "curl",
+            "-4",
+            "-fLsS",
+            "--connect-timeout",
+            str(min(10, timeout)),
+            "--max-time",
+            str(timeout),
+            url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise EconomicCalendarError("curl fallback unavailable: curl not installed") from exc
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(),
+            timeout=timeout + 2,
+        )
+    except TimeoutError as exc:
+        process.kill()
+        await process.communicate()
+        raise EconomicCalendarError("curl fallback timed out") from exc
+
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip()
+        raise EconomicCalendarError(
+            f"curl fallback failed with exit {process.returncode}"
+            + (f": {detail}" if detail else "")
+        )
+
+    try:
+        payload = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EconomicCalendarError(f"curl fallback returned invalid JSON: {exc}") from exc
+    return parse_calendar_payload(payload)
 
 
 async def fetch_calendar_events(
@@ -127,19 +171,16 @@ async def fetch_calendar_events(
     cache_seconds: int = 300,
     stale_fallback_minutes: int = 180,
     request_timeout_seconds: float = 25.0,
-    failure_cooldown_seconds: int = 60,
+    failure_cooldown_seconds: int = 300,
     max_attempts: int = 2,
 ) -> list[CalendarEvent]:
     """Fetch and cache the weekly calendar export.
 
-    A short success cache avoids hitting the provider on every MT5 /hint poll.
-    A failure cooldown prevents a temporary provider/network outage from making
-    every 15-second AutoTrader poll wait on the same failed network request.
-    A recent last-known-good calendar remains usable for a bounded period.
-
-    Attempt 1 honors the process proxy/environment settings. Attempt 2 bypasses
-    those settings and tries a direct connection. This mirrors the common case
-    where shell curl works but Python/httpx inherited a broken proxy route.
+    httpx is tried first with environment/proxy routing, then without it. If both
+    fail, a curl -4 subprocess is used because that path is known to work on some
+    Ubuntu/VPN setups where httpx cannot connect. A recent last-known-good cache
+    remains usable for a bounded period and the guard stays fail-closed if all
+    refresh paths fail.
     """
     now = datetime.now(UTC)
     cached = _cache.get(url)
@@ -193,14 +234,12 @@ async def fetch_calendar_events(
                 _cache[url] = _CalendarCache(events=list(events), fetched_at=now)
                 _failures.pop(url, None)
                 if attempt > 1:
-                    logger.info(
-                        "Economic calendar connected on direct fallback after env/proxy route failed."
-                    )
+                    logger.info("Economic calendar connected on direct httpx fallback.")
                 return events
             except (httpx.HTTPError, ValueError, EconomicCalendarError) as exc:
                 last_exc = exc
                 logger.warning(
-                    "Economic calendar attempt %d/%d failed (trust_env=%s): %s",
+                    "Economic calendar httpx attempt %d/%d failed (trust_env=%s): %s",
                     attempt,
                     attempts,
                     trust_env,
@@ -208,6 +247,17 @@ async def fetch_calendar_events(
                 )
                 if attempt < attempts:
                     await asyncio.sleep(0.75 * attempt)
+
+        try:
+            events = await _fetch_with_curl(url, request_timeout_seconds)
+        except EconomicCalendarError as exc:
+            last_exc = exc
+            logger.warning("Economic calendar curl fallback failed: %s", exc)
+        else:
+            _cache[url] = _CalendarCache(events=list(events), fetched_at=now)
+            _failures.pop(url, None)
+            logger.info("Economic calendar refreshed via curl IPv4 fallback.")
+            return events
 
         assert last_exc is not None
         reason = _failure_reason(last_exc, url)
@@ -320,7 +370,7 @@ async def collect_calendar_news(
     cache_seconds: int = 300,
     stale_fallback_minutes: int = 180,
     request_timeout_seconds: float = 25.0,
-    failure_cooldown_seconds: int = 60,
+    failure_cooldown_seconds: int = 300,
     max_attempts: int = 2,
     high_before_minutes: int = 30,
     high_after_minutes: int = 30,
