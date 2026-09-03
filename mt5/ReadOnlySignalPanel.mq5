@@ -8,7 +8,7 @@ input int RefreshSeconds = 60;
 input int RequestTimeoutMs = 45000;
 input int MinPanelConfidence = 75;
 input int PanelWidth = 460;
-input int PanelHeight = 430;
+input int PanelHeight = 535;
 input int PanelFontSize = 14;
 input int PanelLeft = 20;
 input int PanelTop = 170;
@@ -58,6 +58,28 @@ string JsonValue(const string json, const string key)
    if(ending < 0)
       ending = length;
    return StringSubstr(json, position, ending - position);
+}
+
+color TrendColor(const string trend)
+{
+   if(trend == "BULLISH")
+      return clrLime;
+   if(trend == "BEARISH")
+      return clrTomato;
+   if(trend == "RANGE")
+      return clrGold;
+   return clrSilver;
+}
+
+color MtfColor(const string status)
+{
+   if(status == "CONFIRM")
+      return clrLime;
+   if(status == "OPPOSE")
+      return clrTomato;
+   if(status == "MIXED" || status == "OBSERVE")
+      return clrGold;
+   return clrSilver;
 }
 
 void CreateBackground()
@@ -135,6 +157,13 @@ void ShowPanel(
    const string symbol,
    const string confidence,
    const string technical_score,
+   const string h1_trend,
+   const string h1_structure,
+   const string h1_event,
+   const string h4_trend,
+   const string h4_structure,
+   const string h4_event,
+   const string mtf_status,
    const string news_risk,
    const string tipranks_status,
    const string tipranks_adjustment,
@@ -180,16 +209,37 @@ void ShowPanel(
       clrWhite
    );
    SetLine("Technical", "Technical score: " + technical_score, 258, PanelFontSize, clrWhite);
-   SetLine("News", "News risk: " + news_risk, 290, PanelFontSize, clrWhite);
+   SetLine(
+      "H1",
+      "H1: " + h1_trend + " | " + h1_structure + " | " + h1_event,
+      290,
+      PanelFontSize - 1,
+      TrendColor(h1_trend)
+   );
+   SetLine(
+      "H4",
+      "H4: " + h4_trend + " | " + h4_structure + " | " + h4_event,
+      322,
+      PanelFontSize - 1,
+      TrendColor(h4_trend)
+   );
+   SetLine(
+      "MTF",
+      "MTF structure: " + mtf_status + "  (observer)",
+      354,
+      PanelFontSize - 1,
+      MtfColor(mtf_status)
+   );
+   SetLine("News", "News risk: " + news_risk, 386, PanelFontSize, clrWhite);
    SetLine(
       "TipRanks",
       "TipRanks: " + tipranks_status + "  (" + tipranks_adjustment + ")",
-      322,
+      418,
       PanelFontSize,
       tipranks_color
    );
-   SetLine("Guidance", guidance, 354, PanelFontSize - 1, action_color);
-   SetLine("Time", "UTC: " + generated_at, 382, PanelFontSize - 2, clrWhite);
+   SetLine("Guidance", guidance, 450, PanelFontSize - 1, action_color);
+   SetLine("Time", "UTC: " + generated_at, 482, PanelFontSize - 2, clrWhite);
    ChartRedraw();
 }
 
@@ -209,6 +259,9 @@ void DeletePanel()
    ObjectDelete(0, Prefix + "Decision");
    ObjectDelete(0, Prefix + "Confidence");
    ObjectDelete(0, Prefix + "Technical");
+   ObjectDelete(0, Prefix + "H1");
+   ObjectDelete(0, Prefix + "H4");
+   ObjectDelete(0, Prefix + "MTF");
    ObjectDelete(0, Prefix + "News");
    ObjectDelete(0, Prefix + "TipRanks");
    ObjectDelete(0, Prefix + "Guidance");
@@ -250,6 +303,13 @@ bool RefreshHint()
          _Symbol,
          "0",
          "0",
+         "UNAVAILABLE",
+         "UNAVAILABLE",
+         "NONE",
+         "UNAVAILABLE",
+         "UNAVAILABLE",
+         "NONE",
+         "UNAVAILABLE",
          "UNKNOWN",
          "UNAVAILABLE",
          "0",
@@ -272,6 +332,13 @@ bool RefreshHint()
          _Symbol,
          "0",
          "0",
+         "UNAVAILABLE",
+         "UNAVAILABLE",
+         "NONE",
+         "UNAVAILABLE",
+         "UNAVAILABLE",
+         "NONE",
+         "UNAVAILABLE",
          "UNKNOWN",
          "UNAVAILABLE",
          "0",
@@ -285,6 +352,13 @@ bool RefreshHint()
    string symbol = JsonValue(response, "symbol");
    string confidence = JsonValue(response, "confidence");
    string technical_score = JsonValue(response, "technical_score");
+   string h1_trend = JsonValue(response, "h1_trend");
+   string h1_structure = JsonValue(response, "h1_structure");
+   string h1_event = JsonValue(response, "h1_structure_event");
+   string h4_trend = JsonValue(response, "h4_trend");
+   string h4_structure = JsonValue(response, "h4_structure");
+   string h4_event = JsonValue(response, "h4_structure_event");
+   string mtf_status = JsonValue(response, "mtf_status");
    string news_risk = JsonValue(response, "news_risk");
    string tipranks_status = JsonValue(response, "tipranks_status");
    string tipranks_adjustment = JsonValue(response, "tipranks_adjustment");
@@ -298,6 +372,13 @@ bool RefreshHint()
          _Symbol,
          "0",
          "0",
+         "UNAVAILABLE",
+         "UNAVAILABLE",
+         "NONE",
+         "UNAVAILABLE",
+         "UNAVAILABLE",
+         "NONE",
+         "UNAVAILABLE",
          "UNKNOWN",
          "UNAVAILABLE",
          "0",
@@ -306,6 +387,20 @@ bool RefreshHint()
       return false;
    }
 
+   if(h1_trend == "")
+      h1_trend = "UNAVAILABLE";
+   if(h1_structure == "")
+      h1_structure = "UNAVAILABLE";
+   if(h1_event == "")
+      h1_event = "NONE";
+   if(h4_trend == "")
+      h4_trend = "UNAVAILABLE";
+   if(h4_structure == "")
+      h4_structure = "UNAVAILABLE";
+   if(h4_event == "")
+      h4_event = "NONE";
+   if(mtf_status == "")
+      mtf_status = "UNAVAILABLE";
    if(tipranks_status == "")
       tipranks_status = "UNAVAILABLE";
    if(tipranks_adjustment == "")
@@ -329,6 +424,13 @@ bool RefreshHint()
       symbol,
       confidence,
       technical_score,
+      h1_trend,
+      h1_structure,
+      h1_event,
+      h4_trend,
+      h4_structure,
+      h4_event,
+      mtf_status,
       news_risk,
       tipranks_status,
       tipranks_adjustment,
@@ -356,6 +458,13 @@ int OnInit()
       _Symbol,
       "0",
       "0",
+      "UNAVAILABLE",
+      "UNAVAILABLE",
+      "NONE",
+      "UNAVAILABLE",
+      "UNAVAILABLE",
+      "NONE",
+      "UNAVAILABLE",
       "UNKNOWN",
       "UNAVAILABLE",
       "0",
