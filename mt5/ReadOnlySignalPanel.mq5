@@ -7,7 +7,7 @@ input string ApiUrl = "http://127.0.0.1:8000/hint";
 input int RefreshSeconds = 60;
 input int RequestTimeoutMs = 45000;
 input int PanelWidth = 460;
-input int PanelHeight = 330;
+input int PanelHeight = 380;
 input int PanelFontSize = 14;
 input int PanelLeft = 20;
 input int PanelTop = 170;
@@ -83,7 +83,6 @@ void CreateBackground()
          return;
       }
 
-      // Keep the translucent canvas behind all labels so it never dims text.
       ObjectSetInteger(0, name, OBJPROP_BACK, true);
       ObjectSetInteger(0, name, OBJPROP_ZORDER, 0);
       ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
@@ -136,6 +135,8 @@ void ShowPanel(
    const string confidence,
    const string technical_score,
    const string news_risk,
+   const string tipranks_status,
+   const string tipranks_adjustment,
    const string generated_at
 )
 {
@@ -154,19 +155,34 @@ void ShowPanel(
       guidance = "SELL BIAS - MANUAL CONFIRMATION REQUIRED";
    }
 
+   color tipranks_color = clrSilver;
+   if(tipranks_status == "CONFIRM")
+      tipranks_color = clrLime;
+   else if(tipranks_status == "OPPOSE")
+      tipranks_color = clrTomato;
+   else if(tipranks_status == "NEUTRAL")
+      tipranks_color = clrGold;
+
    CurrentActionColor = action_color;
    BlinkVisible = true;
 
    SetLine("Hello", "Hello Amir", 58, PanelFontSize + 5, clrWhite);
    SetLine("Title", "AI TRADING ASSISTANT  |  READ ONLY", 92, PanelFontSize, clrDeepSkyBlue);
    SetLine("Status", "Status: " + status, 126, PanelFontSize, clrWhite);
-   SetLine("Symbol", "Symbol: " + symbol, 158, PanelFontSize, clrWhite);
+   SetLine("Symbol", "Symbol: " + symbol + "  |  M15", 158, PanelFontSize, clrWhite);
    SetLine("Decision", "Decision: " + action, 190, PanelFontSize + 3, action_color);
    SetLine("Confidence", "Confidence: " + confidence + " / 100", 226, PanelFontSize, clrWhite);
    SetLine("Technical", "Technical score: " + technical_score, 258, PanelFontSize, clrWhite);
    SetLine("News", "News risk: " + news_risk, 290, PanelFontSize, clrWhite);
-   SetLine("Guidance", guidance, 322, PanelFontSize - 1, action_color);
-   SetLine("Time", "UTC: " + generated_at, 350, PanelFontSize - 2, clrWhite);
+   SetLine(
+      "TipRanks",
+      "TipRanks: " + tipranks_status + "  (" + tipranks_adjustment + ")",
+      322,
+      PanelFontSize,
+      tipranks_color
+   );
+   SetLine("Guidance", guidance, 354, PanelFontSize - 1, action_color);
+   SetLine("Time", "UTC: " + generated_at, 382, PanelFontSize - 2, clrWhite);
    ChartRedraw();
 }
 
@@ -187,6 +203,7 @@ void DeletePanel()
    ObjectDelete(0, Prefix + "Confidence");
    ObjectDelete(0, Prefix + "Technical");
    ObjectDelete(0, Prefix + "News");
+   ObjectDelete(0, Prefix + "TipRanks");
    ObjectDelete(0, Prefix + "Guidance");
    ObjectDelete(0, Prefix + "Time");
 }
@@ -227,6 +244,8 @@ bool RefreshHint()
          "0",
          "0",
          "UNKNOWN",
+         "UNAVAILABLE",
+         "0",
          "-"
       );
       Print(
@@ -247,6 +266,8 @@ bool RefreshHint()
          "0",
          "0",
          "UNKNOWN",
+         "UNAVAILABLE",
+         "0",
          "-"
       );
       Print("ReadOnlySignalPanel API response: ", response);
@@ -258,13 +279,30 @@ bool RefreshHint()
    string confidence = JsonValue(response, "confidence");
    string technical_score = JsonValue(response, "technical_score");
    string news_risk = JsonValue(response, "news_risk");
+   string tipranks_status = JsonValue(response, "tipranks_status");
+   string tipranks_adjustment = JsonValue(response, "tipranks_adjustment");
    string generated_at = JsonValue(response, "generated_at");
 
    if(action == "" || symbol == "")
    {
-      ShowPanel("INVALID RESPONSE", "WAIT", _Symbol, "0", "0", "UNKNOWN", "-");
+      ShowPanel(
+         "INVALID RESPONSE",
+         "WAIT",
+         _Symbol,
+         "0",
+         "0",
+         "UNKNOWN",
+         "UNAVAILABLE",
+         "0",
+         "-"
+      );
       return false;
    }
+
+   if(tipranks_status == "")
+      tipranks_status = "UNAVAILABLE";
+   if(tipranks_adjustment == "")
+      tipranks_adjustment = "0";
 
    ShowPanel(
       "CONNECTED",
@@ -273,6 +311,8 @@ bool RefreshHint()
       confidence,
       technical_score,
       news_risk,
+      tipranks_status,
+      tipranks_adjustment,
       generated_at
    );
    return true;
@@ -284,7 +324,17 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
 
    EventSetMillisecondTimer(500);
-   ShowPanel("CONNECTING", "WAIT", _Symbol, "0", "0", "UNKNOWN", "-");
+   ShowPanel(
+      "CONNECTING",
+      "WAIT",
+      _Symbol,
+      "0",
+      "0",
+      "UNKNOWN",
+      "UNAVAILABLE",
+      "0",
+      "-"
+   );
    RefreshHint();
    LastApiRefreshMs = GetTickCount64();
    return INIT_SUCCEEDED;
