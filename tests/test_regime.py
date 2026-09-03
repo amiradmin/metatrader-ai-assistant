@@ -8,18 +8,18 @@ from meta_trader_ai.regime import (
 
 
 @dataclass(frozen=True)
-class TestCandle:
+class CandleStub:
     high: float
     low: float
     close: float
 
 
-def _trend_candles(direction: float, count: int = 100) -> list[TestCandle]:
-    candles: list[TestCandle] = []
+def _trend_candles(direction: float, count: int = 100) -> list[CandleStub]:
+    candles: list[CandleStub] = []
     close = 100.0
     for _ in range(count):
         close += direction
-        candles.append(TestCandle(high=close + 0.5, low=close - 0.5, close=close))
+        candles.append(CandleStub(high=close + 0.5, low=close - 0.5, close=close))
     return candles
 
 
@@ -40,10 +40,10 @@ def test_classifier_detects_clean_downtrend() -> None:
 
 
 def test_classifier_detects_choppy_range() -> None:
-    candles: list[TestCandle] = []
+    candles: list[CandleStub] = []
     for index in range(100):
         close = 100.0 + (1.0 if index % 2 else -1.0)
-        candles.append(TestCandle(high=close + 0.5, low=close - 0.5, close=close))
+        candles.append(CandleStub(high=close + 0.5, low=close - 0.5, close=close))
 
     state = classify_regime(candles)
     assert state.trend is TrendRegime.RANGING
@@ -51,12 +51,12 @@ def test_classifier_detects_choppy_range() -> None:
 
 
 def test_classifier_detects_recent_high_volatility() -> None:
-    candles: list[TestCandle] = []
+    candles: list[CandleStub] = []
     close = 100.0
     for index in range(100):
         close += 0.1
         width = 0.5 if index < 86 else 2.5
-        candles.append(TestCandle(high=close + width, low=close - width, close=close))
+        candles.append(CandleStub(high=close + width, low=close - width, close=close))
 
     state = classify_regime(candles)
     assert state.volatility is VolatilityRegime.HIGH_VOLATILITY
