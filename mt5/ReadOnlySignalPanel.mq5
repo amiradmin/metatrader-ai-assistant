@@ -82,6 +82,12 @@ void CreateBackground()
          Print("ReadOnlySignalPanel could not create the alpha background: ", GetLastError());
          return;
       }
+
+      // Keep the translucent canvas behind all labels so it never dims text.
+      ObjectSetInteger(0, name, OBJPROP_BACK, true);
+      ObjectSetInteger(0, name, OBJPROP_ZORDER, 0);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
    }
 
    int opacity = MathMax(0, MathMin(100, PanelOpacityPercent));
@@ -115,6 +121,8 @@ void SetLine(
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, PanelTop + y - 40);
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, font_size);
    ObjectSetInteger(0, name, OBJPROP_COLOR, text_color);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_ZORDER, 10);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
    ObjectSetString(0, name, OBJPROP_FONT, "DejaVu Sans");
@@ -151,14 +159,14 @@ void ShowPanel(
 
    SetLine("Hello", "Hello Amir", 58, PanelFontSize + 5, clrWhite);
    SetLine("Title", "AI TRADING ASSISTANT  |  READ ONLY", 92, PanelFontSize, clrDeepSkyBlue);
-   SetLine("Status", "Status: " + status, 126, PanelFontSize, clrSilver);
+   SetLine("Status", "Status: " + status, 126, PanelFontSize, clrWhite);
    SetLine("Symbol", "Symbol: " + symbol, 158, PanelFontSize, clrWhite);
    SetLine("Decision", "Decision: " + action, 190, PanelFontSize + 3, action_color);
    SetLine("Confidence", "Confidence: " + confidence + " / 100", 226, PanelFontSize, clrWhite);
    SetLine("Technical", "Technical score: " + technical_score, 258, PanelFontSize, clrWhite);
    SetLine("News", "News risk: " + news_risk, 290, PanelFontSize, clrWhite);
    SetLine("Guidance", guidance, 322, PanelFontSize - 1, action_color);
-   SetLine("Time", "UTC: " + generated_at, 350, PanelFontSize - 3, clrSilver);
+   SetLine("Time", "UTC: " + generated_at, 350, PanelFontSize - 2, clrWhite);
    ChartRedraw();
 }
 
