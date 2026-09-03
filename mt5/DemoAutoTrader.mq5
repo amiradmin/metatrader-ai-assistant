@@ -8,17 +8,39 @@ input int RefreshSeconds = 15;
 input int RequestTimeoutMs = 45000;
 input int TradesPerSignal = 1;
 input int MaxOpenTrades = 3;
-input double LotSize = 0.01;
 input int MinConfidence = 75;
-input int StopLossPoints = 300;
-input int TakeProfitPoints = 600;
+
+// Risk model: 0.5% is also enforced as a hard ceiling in code.
+input bool UseRiskBasedSizing = true;
+input double RiskPercent = 0.5;
+input double FallbackLotSize = 0.01;
+
+// Dynamic protective stop: completed M15 ATR plus the latest confirmed M15 swing.
+input bool UseDynamicStop = true;
+input int AtrPeriod = 14;
+input double AtrMultiplier = 1.50;
+input int SwingLookbackBars = 30;
+input int SwingLeftBars = 2;
+input int SwingRightBars = 2;
+input int StructureBufferPoints = 50;
+input int MinStopPoints = 150;
+input int MaxStopPoints = 1200;
+input double RewardRiskRatio = 2.0;
+
+// Used only when UseDynamicStop=false.
+input int FallbackStopLossPoints = 300;
+input int FallbackTakeProfitPoints = 600;
+
 input int MaxSpreadPoints = 50;
 input ulong MagicNumber = 26090315;
 input int SlippagePoints = 20;
 input bool VerboseLogging = true;
 
+const double HARD_MAX_RISK_PERCENT = 0.5;
+
 CTrade Trade;
 datetime LastExecutedM15Bar = 0;
+int AtrHandle = INVALID_HANDLE;
 
 string JsonValue(const string json, const string key)
 {
@@ -65,7 +87,20 @@ bool IsDemoAccount()
    return mode == ACCOUNT_TRADE_MODE_DEMO;
 }
 
-double NormalizeVolume(double requested)
+int VolumeDigits(const double step)
+{
+   if(step >= 1.0)
+      return 0;
+   if(step >= 0.1)
+      return 1;
+   if(step >= 0.01)
+      return 2;
+   if(step >= 0.001)
+      return 3;
+   return 4;
+}
+
+double NormalizeVolumeNearest(const double requested)
 {
    double minimum = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double maximum = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
@@ -73,19 +108,28 @@ double NormalizeVolume(double requested)
 
    double value = MathMax(minimum, MathMin(maximum, requested));
    if(step > 0.0)
-      value = MathFloor(value / step + 0.5) * step;
+      value = minimum + MathFloor((value - minimum) / step + 0.5) * step;
 
-   int volume_digits = 2;
-   if(step >= 1.0)
-      volume_digits = 0;
-   else if(step >= 0.1)
-      volume_digits = 1;
-   else if(step >= 0.01)
-      volume_digits = 2;
-   else
-      volume_digits = 3;
+   return NormalizeDouble(value, VolumeDigits(step));
+}
 
-   return NormalizeDouble(value, volume_digits);
+double NormalizeVolumeDown(const double requested)
+{
+   // Never round risk-based size upward: that could exceed the risk budget.
+   double minimum = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maximum = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   if(requested + 1e-12 < minimum)
+      return 0.0;
+
+   double value = MathMin(maximum, requested);
+   if(step > 0.0)
+      value = minimum + MathFloor((value - minimum + 1e-12) / step) * step;
+
+   if(value + 1e-12 < minimum)
+      return 0.0;
+   return NormalizeDouble(value, VolumeDigits(step));
 }
 
 int ManagedOpenPositions()
@@ -167,35 +211,289 @@ bool TradeResultAccepted()
    );
 }
 
-bool OpenManagedTrade(const string action)
+bool GetCompletedM15Atr(double &atr_price)
+{
+   atr_price = 0.0;
+   if(AtrHandle == INVALID_HANDLE)
+      return false;
+
+   double values[];
+   ArraySetAsSeries(values, true);
+   // shift=1 means the still-forming M15 candle cannot change the stop plan.
+   if(CopyBuffer(AtrHandle, 0, 1, 1, values) != 1)
+      return false;
+
+   atr_price = values[0];
+   return atr_price > 0.0;
+}
+
+bool FindRecentConfirmedSwing(const string action, double &swing_price)
+{
+   swing_price = 0.0;
+   if(SwingLookbackBars < SwingLeftBars + SwingRightBars + 3)
+      return false;
+
+   int first_shift = SwingRightBars + 1;
+   int last_shift = SwingLookbackBars;
+
+   for(int shift = first_shift; shift <= last_shift; shift++)
+   {
+      double candidate = (action == "BUY")
+         ? iLow(_Symbol, PERIOD_M15, shift)
+         : iHigh(_Symbol, PERIOD_M15, shift);
+      if(candidate <= 0.0)
+         continue;
+
+      bool confirmed = true;
+      for(int offset = 1; offset <= SwingLeftBars && confirmed; offset++)
+      {
+         double older = (action == "BUY")
+            ? iLow(_Symbol, PERIOD_M15, shift + offset)
+            : iHigh(_Symbol, PERIOD_M15, shift + offset);
+         if(older <= 0.0)
+         {
+            confirmed = false;
+            break;
+         }
+         if(action == "BUY" && candidate >= older)
+            confirmed = false;
+         if(action == "SELL" && candidate <= older)
+            confirmed = false;
+      }
+
+      for(int offset = 1; offset <= SwingRightBars && confirmed; offset++)
+      {
+         double newer = (action == "BUY")
+            ? iLow(_Symbol, PERIOD_M15, shift - offset)
+            : iHigh(_Symbol, PERIOD_M15, shift - offset);
+         if(newer <= 0.0)
+         {
+            confirmed = false;
+            break;
+         }
+         if(action == "BUY" && candidate > newer)
+            confirmed = false;
+         if(action == "SELL" && candidate < newer)
+            confirmed = false;
+      }
+
+      if(confirmed)
+      {
+         swing_price = candidate;
+         return true;
+      }
+   }
+   return false;
+}
+
+bool BuildTradePlan(
+   const string action,
+   const MqlTick &tick,
+   double &entry,
+   double &stop,
+   double &target,
+   double &stop_points,
+   string &stop_source
+)
+{
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   if(point <= 0.0)
+      return false;
+
+   entry = action == "BUY" ? tick.ask : tick.bid;
+   stop = 0.0;
+   target = 0.0;
+   stop_points = 0.0;
+   stop_source = "FIXED";
+
+   if(!UseDynamicStop)
+   {
+      if(FallbackStopLossPoints <= 0 || FallbackTakeProfitPoints <= 0)
+         return false;
+      stop_points = FallbackStopLossPoints;
+      if(action == "BUY")
+      {
+         stop = entry - stop_points * point;
+         target = entry + FallbackTakeProfitPoints * point;
+      }
+      else
+      {
+         stop = entry + stop_points * point;
+         target = entry - FallbackTakeProfitPoints * point;
+      }
+      stop = NormalizeDouble(stop, digits);
+      target = NormalizeDouble(target, digits);
+      return true;
+   }
+
+   double atr_price = 0.0;
+   if(!GetCompletedM15Atr(atr_price))
+   {
+      Print("DemoAutoTrader skipped: completed M15 ATR is unavailable.");
+      return false;
+   }
+
+   double atr_points = (atr_price * AtrMultiplier) / point;
+   double required_points = MathMax((double)MinStopPoints, atr_points);
+   stop_source = "ATR";
+
+   double swing_price = 0.0;
+   if(FindRecentConfirmedSwing(action, swing_price))
+   {
+      double buffered_swing = action == "BUY"
+         ? swing_price - StructureBufferPoints * point
+         : swing_price + StructureBufferPoints * point;
+      double structure_points = action == "BUY"
+         ? (entry - buffered_swing) / point
+         : (buffered_swing - entry) / point;
+
+      if(structure_points > 0.0)
+      {
+         if(MaxStopPoints <= 0 || structure_points <= MaxStopPoints)
+         {
+            if(structure_points > required_points)
+            {
+               required_points = structure_points;
+               stop_source = "ATR+SWING";
+            }
+         }
+         else if(VerboseLogging)
+         {
+            Print(
+               "DemoAutoTrader structure observer: recent swing requires ",
+               DoubleToString(structure_points, 0),
+               " points > MaxStopPoints ", MaxStopPoints,
+               "; ATR stop retained."
+            );
+         }
+      }
+   }
+
+   long broker_stops = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   required_points = MathMax(required_points, (double)broker_stops + 5.0);
+
+   if(MaxStopPoints > 0 && required_points > MaxStopPoints)
+   {
+      Print(
+         "DemoAutoTrader skipped: dynamic stop ", DoubleToString(required_points, 0),
+         " points exceeds MaxStopPoints ", MaxStopPoints, "."
+      );
+      return false;
+   }
+
+   stop_points = required_points;
+   double target_points = stop_points * RewardRiskRatio;
+   if(action == "BUY")
+   {
+      stop = entry - stop_points * point;
+      target = entry + target_points * point;
+   }
+   else
+   {
+      stop = entry + stop_points * point;
+      target = entry - target_points * point;
+   }
+
+   stop = NormalizeDouble(stop, digits);
+   target = NormalizeDouble(target, digits);
+   return true;
+}
+
+double RiskSizedVolume(
+   const string action,
+   const double entry,
+   const double stop,
+   const int trades_to_open,
+   double &risk_budget,
+   double &planned_loss
+)
+{
+   risk_budget = 0.0;
+   planned_loss = 0.0;
+
+   if(!UseRiskBasedSizing)
+      return NormalizeVolumeNearest(FallbackLotSize);
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double effective_risk_percent = MathMin(RiskPercent, HARD_MAX_RISK_PERCENT);
+   risk_budget = equity * effective_risk_percent / 100.0;
+   risk_budget /= MathMax(1, trades_to_open);
+
+   ENUM_ORDER_TYPE order_type = action == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   double one_lot_profit = 0.0;
+   if(!OrderCalcProfit(order_type, _Symbol, 1.0, entry, stop, one_lot_profit))
+   {
+      Print("DemoAutoTrader skipped: OrderCalcProfit failed for risk sizing.");
+      return 0.0;
+   }
+
+   double one_lot_loss = MathAbs(one_lot_profit);
+   if(one_lot_loss <= 0.0)
+      return 0.0;
+
+   double raw_volume = risk_budget / one_lot_loss;
+   double volume = NormalizeVolumeDown(raw_volume);
+   if(volume <= 0.0)
+   {
+      Print(
+         "DemoAutoTrader skipped: broker minimum lot would exceed risk budget $",
+         DoubleToString(risk_budget, 2), "."
+      );
+      return 0.0;
+   }
+
+   planned_loss = one_lot_loss * volume;
+   return volume;
+}
+
+bool OpenManagedTrade(const string action, const int trades_to_open)
 {
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick))
       return false;
 
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   double volume = NormalizeVolume(LotSize);
+   double entry = 0.0;
    double sl = 0.0;
    double tp = 0.0;
-   bool request_ok = false;
+   double stop_points = 0.0;
+   string stop_source = "";
+   if(!BuildTradePlan(action, tick, entry, sl, tp, stop_points, stop_source))
+      return false;
 
+   double risk_budget = 0.0;
+   double planned_loss = 0.0;
+   double volume = RiskSizedVolume(
+      action,
+      entry,
+      sl,
+      trades_to_open,
+      risk_budget,
+      planned_loss
+   );
+   if(volume <= 0.0)
+      return false;
+
+   if(VerboseLogging)
+   {
+      Print(
+         "DemoAutoTrader plan: action=", action,
+         " stop_source=", stop_source,
+         " stop_points=", DoubleToString(stop_points, 0),
+         " RR=", DoubleToString(RewardRiskRatio, 2),
+         " volume=", DoubleToString(volume, 3),
+         " risk_budget=$", DoubleToString(risk_budget, 2),
+         " planned_loss~$", DoubleToString(planned_loss, 2),
+         " SL=", DoubleToString(sl, _Digits),
+         " TP=", DoubleToString(tp, _Digits)
+      );
+   }
+
+   bool request_ok = false;
    if(action == "BUY")
-   {
-      if(StopLossPoints > 0)
-         sl = NormalizeDouble(tick.ask - StopLossPoints * point, digits);
-      if(TakeProfitPoints > 0)
-         tp = NormalizeDouble(tick.ask + TakeProfitPoints * point, digits);
-      request_ok = Trade.Buy(volume, _Symbol, 0.0, sl, tp, "M15 AI DEMO");
-   }
+      request_ok = Trade.Buy(volume, _Symbol, 0.0, sl, tp, "M15 AI DEMO RISK");
    else if(action == "SELL")
-   {
-      if(StopLossPoints > 0)
-         sl = NormalizeDouble(tick.bid + StopLossPoints * point, digits);
-      if(TakeProfitPoints > 0)
-         tp = NormalizeDouble(tick.bid - TakeProfitPoints * point, digits);
-      request_ok = Trade.Sell(volume, _Symbol, 0.0, sl, tp, "M15 AI DEMO");
-   }
+      request_ok = Trade.Sell(volume, _Symbol, 0.0, sl, tp, "M15 AI DEMO RISK");
    else
       return false;
 
@@ -206,7 +504,7 @@ bool OpenManagedTrade(const string action)
    {
       Print(
          "DemoAutoTrader order accepted: action=", action,
-         " volume=", DoubleToString(volume, 2),
+         " volume=", DoubleToString(volume, 3),
          " deal=", Trade.ResultDeal(),
          " order=", Trade.ResultOrder(),
          " retcode=", Trade.ResultRetcode(),
@@ -314,7 +612,7 @@ void EvaluateAndTrade()
 
    for(int i = 0; i < to_open; i++)
    {
-      if(OpenManagedTrade(action))
+      if(OpenManagedTrade(action, to_open))
       {
          opened++;
          Print("DemoAutoTrader opened ", action, " #", opened, " confidence=", confidence);
@@ -322,7 +620,7 @@ void EvaluateAndTrade()
       else
       {
          Print(
-            "DemoAutoTrader order failed. retcode=",
+            "DemoAutoTrader order not opened. retcode=",
             Trade.ResultRetcode(),
             " ",
             Trade.ResultRetcodeDescription()
@@ -340,15 +638,33 @@ int OnInit()
 {
    if(RefreshSeconds < 5 || RequestTimeoutMs < 1000)
       return INIT_PARAMETERS_INCORRECT;
-   if(TradesPerSignal < 1 || MaxOpenTrades < 1 || LotSize <= 0.0)
+   if(TradesPerSignal < 1 || MaxOpenTrades < 1 || FallbackLotSize <= 0.0)
       return INIT_PARAMETERS_INCORRECT;
    if(MinConfidence < 0 || MinConfidence > 100)
+      return INIT_PARAMETERS_INCORRECT;
+   if(RiskPercent <= 0.0 || RiskPercent > HARD_MAX_RISK_PERCENT)
+      return INIT_PARAMETERS_INCORRECT;
+   if(RewardRiskRatio <= 0.0 || AtrPeriod < 2 || AtrMultiplier <= 0.0)
+      return INIT_PARAMETERS_INCORRECT;
+   if(MinStopPoints < 1 || MaxStopPoints < MinStopPoints)
+      return INIT_PARAMETERS_INCORRECT;
+   if(SwingLeftBars < 1 || SwingRightBars < 1)
       return INIT_PARAMETERS_INCORRECT;
 
    if(!IsDemoAccount())
    {
       Alert("DemoAutoTrader is DEMO-ONLY and is blocked on this account.");
       return INIT_FAILED;
+   }
+
+   if(UseDynamicStop)
+   {
+      AtrHandle = iATR(_Symbol, PERIOD_M15, AtrPeriod);
+      if(AtrHandle == INVALID_HANDLE)
+      {
+         Print("DemoAutoTrader init failed: could not create M15 ATR handle.");
+         return INIT_FAILED;
+      }
    }
 
    Trade.SetAsyncMode(false);
@@ -359,6 +675,8 @@ int OnInit()
    Print(
       "DemoAutoTrader ready on DEMO account. Symbol=", _Symbol,
       " M15-first. MinConfidence=", MinConfidence,
+      " risk=", DoubleToString(MathMin(RiskPercent, HARD_MAX_RISK_PERCENT), 2), "%",
+      " dynamic_stop=", UseDynamicStop ? "ON" : "OFF",
       ". Exact threshold is eligible when API action is BUY/SELL."
    );
    return INIT_SUCCEEDED;
@@ -372,4 +690,9 @@ void OnTimer()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   if(AtrHandle != INVALID_HANDLE)
+   {
+      IndicatorRelease(AtrHandle);
+      AtrHandle = INVALID_HANDLE;
+   }
 }
