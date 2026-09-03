@@ -60,6 +60,8 @@ class TradeHint(BaseModel):
     confidence: int = Field(ge=0, le=100)
     technical_score: int = Field(ge=-100, le=100)
     news_risk: NewsRisk
+    tipranks_status: str = "UNAVAILABLE"
+    tipranks_adjustment: int = Field(default=0, ge=-6, le=6)
     reasons: list[str]
     relevant_news: list[NewsItem]
     max_risk_percent: float
