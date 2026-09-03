@@ -43,3 +43,10 @@ def test_stale_news_is_excluded() -> None:
         impact_score=80,
     )
     assert recent_news([old_item], lookback_hours=24, now=now) == []
+
+
+def test_low_confidence_direction_is_forced_to_wait() -> None:
+    hint = build_hint(snapshot(), [], 0.5)
+    assert hint.confidence == 55
+    assert hint.action is Action.WAIT
+    assert any("below safety threshold" in reason for reason in hint.reasons)
