@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 
+from meta_trader_ai.market_structure import MultiTimeframeStructure
 from meta_trader_ai.models import (
     Action,
     MarketSnapshot,
@@ -204,13 +205,59 @@ def _tipranks_adjustment(
     ]
 
 
+def _m15_reference_action(technical_score: int) -> Action:
+    if technical_score >= 30:
+        return Action.BUY
+    if technical_score <= -30:
+        return Action.SELL
+    return Action.WAIT
+
+
+def _mtf_structure_status(
+    action: Action,
+    context: MultiTimeframeStructure | None,
+) -> tuple[str, list[str]]:
+    """Compare M15 bias with H1/H4 structure without changing confidence yet."""
+    if context is None:
+        return "UNAVAILABLE", [
+            "H1/H4 market structure unavailable or stale; observer skipped."
+        ]
+
+    h1 = context.h1
+    h4 = context.h4
+    detail = (
+        f"H1={h1.trend}/{h1.sequence}/{h1.event}; "
+        f"H4={h4.trend}/{h4.sequence}/{h4.event}"
+    )
+    if action is Action.WAIT:
+        return "OBSERVE", [
+            f"MTF market structure observer: {detail}; M15 has no directional bias."
+        ]
+
+    desired = "BULLISH" if action is Action.BUY else "BEARISH"
+    opposite = "BEARISH" if action is Action.BUY else "BULLISH"
+    trends = (h1.trend, h4.trend)
+    if trends == (desired, desired):
+        status = "CONFIRM"
+    elif trends == (opposite, opposite):
+        status = "OPPOSE"
+    else:
+        status = "MIXED"
+
+    return status, [
+        f"MTF market structure {status.lower()}s M15 bias: {detail}. "
+        "Observer only; no confidence points are applied until validation."
+    ]
+
+
 def build_hint(
     snapshot: MarketSnapshot,
     news: list[NewsItem],
     max_risk_percent: float,
     tipranks_context: TipRanksContext | None = None,
+    market_structure_context: MultiTimeframeStructure | None = None,
 ) -> TradeHint:
-    """Build a dynamic M15-first hint with news and optional TipRanks context."""
+    """Build an M15-first hint with news and observational H1/H4 structure."""
     technical_score, rsi14, atr14, ema_gap, reasons = _m15_score(snapshot)
     spread = max(0.0, snapshot.ask - snapshot.bid)
     spread_to_atr = spread / atr14
@@ -266,6 +313,12 @@ def build_hint(
                 "M15 technical score is inside the neutral zone (-30 to +30)."
             )
 
+    mtf_status, mtf_reasons = _mtf_structure_status(
+        _m15_reference_action(technical_score),
+        market_structure_context,
+    )
+    reasons.extend(mtf_reasons)
+
     currencies = {snapshot.symbol[:3].upper(), snapshot.symbol[3:6].upper()}
     relevant = sorted(
         (item for item in news if item.impact_score > 0 and item.currencies & currencies),
@@ -273,6 +326,8 @@ def build_hint(
         reverse=True,
     )[:5]
 
+    h1 = market_structure_context.h1 if market_structure_context else None
+    h4 = market_structure_context.h4 if market_structure_context else None
     return TradeHint(
         action=action,
         symbol=snapshot.symbol,
@@ -281,6 +336,13 @@ def build_hint(
         news_risk=news_risk,
         tipranks_status=tipranks_status,
         tipranks_adjustment=tipranks_adjustment,
+        mtf_status=mtf_status,
+        h1_trend=h1.trend if h1 else "UNAVAILABLE",
+        h1_structure=h1.sequence if h1 else "UNAVAILABLE",
+        h1_structure_event=h1.event if h1 else "NONE",
+        h4_trend=h4.trend if h4 else "UNAVAILABLE",
+        h4_structure=h4.sequence if h4 else "UNAVAILABLE",
+        h4_structure_event=h4.event if h4 else "NONE",
         reasons=reasons,
         relevant_news=relevant,
         max_risk_percent=max_risk_percent,
