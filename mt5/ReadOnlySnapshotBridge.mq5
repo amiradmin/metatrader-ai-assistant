@@ -70,9 +70,10 @@ void OnTimer()
    if(!SymbolInfoTick(InputSymbol, tick))
       return;
 
+   // Start at shift=1 so indicators use completed candles only.
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   int copied = CopyRates(InputSymbol, InputTimeframe, 0, InputBars, rates);
+   int copied = CopyRates(InputSymbol, InputTimeframe, 1, InputBars, rates);
    if(copied < 21)
       return;
 
