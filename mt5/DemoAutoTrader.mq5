@@ -15,6 +15,7 @@ input int TakeProfitPoints = 600;
 input int MaxSpreadPoints = 50;
 input ulong MagicNumber = 26090315;
 input int SlippagePoints = 20;
+input bool VerboseLogging = true;
 
 CTrade Trade;
 datetime LastExecutedM15Bar = 0;
@@ -104,12 +105,16 @@ int ManagedOpenPositions()
    return count;
 }
 
+long CurrentSpreadPoints()
+{
+   return SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+}
+
 bool SpreadIsAcceptable()
 {
-   long spread_points = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    if(MaxSpreadPoints <= 0)
       return true;
-   return spread_points <= MaxSpreadPoints;
+   return CurrentSpreadPoints() <= MaxSpreadPoints;
 }
 
 bool FetchHint(string &action, int &confidence, string &symbol, string &news_risk)
@@ -152,6 +157,16 @@ bool FetchHint(string &action, int &confidence, string &symbol, string &news_ris
    return action != "" && symbol != "";
 }
 
+bool TradeResultAccepted()
+{
+   uint retcode = Trade.ResultRetcode();
+   return (
+      retcode == TRADE_RETCODE_DONE
+      || retcode == TRADE_RETCODE_DONE_PARTIAL
+      || retcode == TRADE_RETCODE_PLACED
+   );
+}
+
 bool OpenManagedTrade(const string action)
 {
    MqlTick tick;
@@ -163,6 +178,7 @@ bool OpenManagedTrade(const string action)
    double volume = NormalizeVolume(LotSize);
    double sl = 0.0;
    double tp = 0.0;
+   bool request_ok = false;
 
    if(action == "BUY")
    {
@@ -170,19 +186,34 @@ bool OpenManagedTrade(const string action)
          sl = NormalizeDouble(tick.ask - StopLossPoints * point, digits);
       if(TakeProfitPoints > 0)
          tp = NormalizeDouble(tick.ask + TakeProfitPoints * point, digits);
-      return Trade.Buy(volume, _Symbol, 0.0, sl, tp, "M15 AI DEMO");
+      request_ok = Trade.Buy(volume, _Symbol, 0.0, sl, tp, "M15 AI DEMO");
    }
-
-   if(action == "SELL")
+   else if(action == "SELL")
    {
       if(StopLossPoints > 0)
          sl = NormalizeDouble(tick.bid + StopLossPoints * point, digits);
       if(TakeProfitPoints > 0)
          tp = NormalizeDouble(tick.bid - TakeProfitPoints * point, digits);
-      return Trade.Sell(volume, _Symbol, 0.0, sl, tp, "M15 AI DEMO");
+      request_ok = Trade.Sell(volume, _Symbol, 0.0, sl, tp, "M15 AI DEMO");
    }
+   else
+      return false;
 
-   return false;
+   if(!request_ok || !TradeResultAccepted())
+      return false;
+
+   if(VerboseLogging)
+   {
+      Print(
+         "DemoAutoTrader order accepted: action=", action,
+         " volume=", DoubleToString(volume, 2),
+         " deal=", Trade.ResultDeal(),
+         " order=", Trade.ResultOrder(),
+         " retcode=", Trade.ResultRetcode(),
+         " ", Trade.ResultRetcodeDescription()
+      );
+   }
+   return true;
 }
 
 void EvaluateAndTrade()
@@ -195,7 +226,11 @@ void EvaluateAndTrade()
    }
 
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
+   {
+      if(VerboseLogging)
+         Print("DemoAutoTrader waiting: Algo Trading / EA trading is not allowed.");
       return;
+   }
 
    datetime current_bar = iTime(_Symbol, PERIOD_M15, 0);
    if(current_bar <= 0 || current_bar == LastExecutedM15Bar)
@@ -208,15 +243,36 @@ void EvaluateAndTrade()
    if(!FetchHint(action, confidence, symbol, news_risk))
       return;
 
+   long spread_points = CurrentSpreadPoints();
+   if(VerboseLogging)
+   {
+      Print(
+         "DemoAutoTrader signal: action=", action,
+         " confidence=", confidence,
+         " min=", MinConfidence,
+         " news=", news_risk,
+         " spread=", spread_points,
+         " max_spread=", MaxSpreadPoints,
+         " open=", ManagedOpenPositions(),
+         "/", MaxOpenTrades
+      );
+   }
+
    if(symbol != _Symbol)
    {
       Print("DemoAutoTrader skipped: API symbol ", symbol, " != chart symbol ", _Symbol);
       return;
    }
 
+   // Confidence alone never creates a direction: the API must explicitly return BUY/SELL.
    if(action != "BUY" && action != "SELL")
+   {
+      if(VerboseLogging)
+         Print("DemoAutoTrader skipped: API action is ", action, ".");
       return;
+   }
 
+   // Exact threshold is allowed: confidence == MinConfidence passes.
    if(confidence < MinConfidence)
    {
       Print("DemoAutoTrader skipped: confidence ", confidence, " < ", MinConfidence);
@@ -224,25 +280,37 @@ void EvaluateAndTrade()
    }
 
    if(news_risk == "HIGH")
+   {
+      Print("DemoAutoTrader skipped: HIGH news risk.");
       return;
+   }
 
    if(!SpreadIsAcceptable())
    {
-      Print("DemoAutoTrader skipped: spread above MaxSpreadPoints.");
+      Print(
+         "DemoAutoTrader skipped: spread ", spread_points,
+         " > MaxSpreadPoints ", MaxSpreadPoints, "."
+      );
       return;
    }
 
    int already_open = ManagedOpenPositions();
    int capacity = MaxOpenTrades - already_open;
    if(capacity <= 0)
+   {
+      if(VerboseLogging)
+         Print("DemoAutoTrader skipped: MaxOpenTrades reached.");
       return;
+   }
 
    int requested = MathMax(1, TradesPerSignal);
    int to_open = MathMin(requested, capacity);
    int opened = 0;
 
+   Trade.SetAsyncMode(false);
    Trade.SetExpertMagicNumber(MagicNumber);
    Trade.SetDeviationInPoints(SlippagePoints);
+   Trade.SetTypeFillingBySymbol(_Symbol);
 
    for(int i = 0; i < to_open; i++)
    {
@@ -263,7 +331,7 @@ void EvaluateAndTrade()
       }
    }
 
-   // Mark the bar only after a real order was accepted, so transient failures can retry.
+   // Mark the bar only after the broker reports an accepted trade result.
    if(opened > 0)
       LastExecutedM15Bar = current_bar;
 }
@@ -283,10 +351,16 @@ int OnInit()
       return INIT_FAILED;
    }
 
+   Trade.SetAsyncMode(false);
    Trade.SetExpertMagicNumber(MagicNumber);
    Trade.SetDeviationInPoints(SlippagePoints);
+   Trade.SetTypeFillingBySymbol(_Symbol);
    EventSetTimer(RefreshSeconds);
-   Print("DemoAutoTrader ready on DEMO account. Symbol=", _Symbol, " M15-first.");
+   Print(
+      "DemoAutoTrader ready on DEMO account. Symbol=", _Symbol,
+      " M15-first. MinConfidence=", MinConfidence,
+      ". Exact threshold is eligible when API action is BUY/SELL."
+   );
    return INIT_SUCCEEDED;
 }
 
