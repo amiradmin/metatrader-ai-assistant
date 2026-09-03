@@ -1,15 +1,4 @@
-"""Read-only context collection for shadow forward testing.
-
-This module does not change the live signal engine and never places orders.
-It enriches each forward-test observation with:
-- H1/H4 causal trend + volatility regimes exported by MT5
-- US 10Y real yield (FRED series DFII10)
-- upcoming high/medium-impact BLS releases
-- upcoming scheduled FOMC decisions
-
-External data is cached locally so temporary network failures do not stop the
-shadow forward test.
-"""
+"""Read-only context collection for shadow forward testing."""
 
 from __future__ import annotations
 
@@ -18,6 +7,7 @@ import io
 import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -25,47 +15,16 @@ import httpx
 
 from meta_trader_ai.regime import classify_regime
 
-
 FRED_REAL_YIELD_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFII10"
 BLS_CALENDAR_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
-PROJECT_URL = "https://github.com/amiradmin/metatrader-ai-assistant"
+BLS_MONTH_URL = "https://www.bls.gov/schedule/{year}/{month:02d}_sched_list.htm"
 NEW_YORK = ZoneInfo("America/New_York")
 
-# BLS may block anonymous-looking automated retrieval. Keep requests slow and
-# identify this read-only research client with a stable project URL.
-BLS_REQUEST_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "Chrome/151.0 Safari/537.36 "
-        f"MetaTraderAIAssistant/0.3 (+{PROJECT_URL})"
-    ),
-    "Accept": "text/calendar,text/plain;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.bls.gov/schedule/",
-    "Cache-Control": "no-cache",
-}
-
-# Official FOMC meeting dates published by the Federal Reserve. The statement
-# has historically been released at 14:00 ET on the final meeting day. Because
-# the future calendar page itself publishes dates rather than an exact release
-# timestamp, the time quality is recorded explicitly as STANDARD_14_ET.
 FOMC_FINAL_DATES = (
-    date(2026, 1, 28),
-    date(2026, 3, 18),
-    date(2026, 4, 29),
-    date(2026, 6, 17),
-    date(2026, 7, 29),
-    date(2026, 9, 16),
-    date(2026, 10, 28),
-    date(2026, 12, 9),
-    date(2027, 1, 27),
-    date(2027, 3, 17),
-    date(2027, 4, 28),
-    date(2027, 6, 9),
-    date(2027, 7, 28),
-    date(2027, 9, 15),
-    date(2027, 10, 27),
-    date(2027, 12, 8),
+    date(2026, 1, 28), date(2026, 3, 18), date(2026, 4, 29), date(2026, 6, 17),
+    date(2026, 7, 29), date(2026, 9, 16), date(2026, 10, 28), date(2026, 12, 9),
+    date(2027, 1, 27), date(2027, 3, 17), date(2027, 4, 28), date(2027, 6, 9),
+    date(2027, 7, 28), date(2027, 9, 15), date(2027, 10, 27), date(2027, 12, 8),
 )
 
 
@@ -136,20 +95,15 @@ def _timeframe_features(payload: dict[str, object], key: str) -> TimeframeFeatur
     raw = payload.get(key)
     if not isinstance(raw, dict):
         return TimeframeFeatures()
-
-    highs = raw.get("highs", [])
-    lows = raw.get("lows", [])
-    closes = raw.get("closes", [])
+    highs, lows, closes = raw.get("highs", []), raw.get("lows", []), raw.get("closes", [])
     if not isinstance(highs, list) or not isinstance(lows, list) or not isinstance(closes, list):
         return TimeframeFeatures()
     if len(closes) < 65 or len(highs) != len(closes) or len(lows) != len(closes):
         return TimeframeFeatures()
-
-    candles = [
+    regime = classify_regime([
         MiniCandle(high=float(high), low=float(low), close=float(close))
         for high, low, close in zip(highs, lows, closes)
-    ]
-    regime = classify_regime(candles)
+    ])
     return TimeframeFeatures(
         trend=regime.trend.value,
         volatility=regime.volatility.value,
@@ -159,36 +113,21 @@ def _timeframe_features(payload: dict[str, object], key: str) -> TimeframeFeatur
     )
 
 
-def load_mt5_context(
-    path: Path,
-    *,
-    symbol: str,
-    max_age_seconds: int = 90,
-    now: datetime | None = None,
-) -> tuple[TimeframeFeatures, TimeframeFeatures]:
-    """Load the independent H1/H4 context export and classify completed bars."""
+def load_mt5_context(path: Path, *, symbol: str, max_age_seconds: int = 90, now: datetime | None = None) -> tuple[TimeframeFeatures, TimeframeFeatures]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise MarketContextError(f"MT5 context unavailable: {exc}") from exc
-
     if str(payload.get("symbol", "")) != symbol:
-        raise MarketContextError(
-            f"MT5 context symbol mismatch: {payload.get('symbol')} != {symbol}"
-        )
-
+        raise MarketContextError(f"MT5 context symbol mismatch: {payload.get('symbol')} != {symbol}")
     try:
         generated_at = _parse_iso(str(payload["generated_at"]))
     except (KeyError, ValueError) as exc:
         raise MarketContextError("MT5 context generated_at is invalid") from exc
-
-    current = _aware_utc(now or datetime.now(UTC))
-    age = (current - generated_at).total_seconds()
+    age = (_aware_utc(now or datetime.now(UTC)) - generated_at).total_seconds()
     if age > max_age_seconds:
         raise MarketContextError(f"MT5 context is stale ({age:.1f}s old)")
-
-    h1 = _timeframe_features(payload, "h1")
-    h4 = _timeframe_features(payload, "h4")
+    h1, h4 = _timeframe_features(payload, "h1"), _timeframe_features(payload, "h4")
     if h1.trend == "UNAVAILABLE" or h4.trend == "UNAVAILABLE":
         raise MarketContextError("MT5 H1/H4 context arrays are incomplete")
     return h1, h4
@@ -206,32 +145,28 @@ def _unfold_ics(text: str) -> list[str]:
 
 def _parse_ics_datetime(left: str, raw_value: str) -> datetime | None:
     params: dict[str, str] = {}
-    pieces = left.split(";")
-    for item in pieces[1:]:
+    for item in left.split(";")[1:]:
         if "=" in item:
             key, value = item.split("=", 1)
             params[key.upper()] = value
-
     value = raw_value.strip()
     if len(value) == 8 and value.isdigit():
         return None
-
     try:
         if value.endswith("Z"):
             for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%dT%H%MZ"):
                 try:
                     return datetime.strptime(value, fmt).replace(tzinfo=UTC)
                 except ValueError:
-                    continue
+                    pass
             return None
-
         parsed = None
         for fmt in ("%Y%m%dT%H%M%S", "%Y%m%dT%H%M"):
             try:
                 parsed = datetime.strptime(value, fmt)
                 break
             except ValueError:
-                continue
+                pass
         if parsed is None:
             return None
         tz_name = params.get("TZID", "America/New_York").strip('"')
@@ -242,77 +177,121 @@ def _parse_ics_datetime(left: str, raw_value: str) -> datetime | None:
 
 def _impact_for_bls(name: str) -> str | None:
     lowered = name.casefold()
-    high = (
-        "employment situation",
-        "consumer price index",
-        "producer price index",
-    )
-    medium = (
-        "job openings and labor turnover",
-        "employment cost index",
-    )
-    if any(item in lowered for item in high):
+    if any(item in lowered for item in ("employment situation", "consumer price index", "producer price index")):
         return "HIGH"
-    if any(item in lowered for item in medium):
+    if any(item in lowered for item in ("job openings and labor turnover", "employment cost index")):
         return "MEDIUM"
     return None
 
 
 def parse_bls_ics(text: str) -> list[EconomicEvent]:
-    """Parse relevant market-moving BLS releases from the official ICS calendar."""
     events: list[EconomicEvent] = []
     current: dict[str, tuple[str, str]] | None = None
-
     for line in _unfold_ics(text):
         if line == "BEGIN:VEVENT":
             current = {}
             continue
         if line == "END:VEVENT":
             if current is not None:
-                summary_item = current.get("SUMMARY")
-                start_item = current.get("DTSTART")
+                summary_item, start_item = current.get("SUMMARY"), current.get("DTSTART")
                 if summary_item and start_item:
                     name = summary_item[1].replace("\\,", ",").replace("\\n", " ").strip()
-                    impact = _impact_for_bls(name)
-                    event_time = _parse_ics_datetime(start_item[0], start_item[1])
+                    impact, event_time = _impact_for_bls(name), _parse_ics_datetime(start_item[0], start_item[1])
                     if impact and event_time is not None:
-                        events.append(
-                            EconomicEvent(
-                                name=name,
-                                source="BLS",
-                                impact=impact,
-                                time_utc=event_time,
-                                timing_quality="OFFICIAL_CALENDAR",
-                            )
-                        )
+                        events.append(EconomicEvent(name, "BLS", impact, event_time, "OFFICIAL_CALENDAR"))
             current = None
             continue
         if current is None or ":" not in line:
             continue
         left, value = line.split(":", 1)
-        name = left.split(";", 1)[0].upper()
-        if name in {"SUMMARY", "DTSTART"}:
-            current[name] = (left, value)
-
+        key = left.split(";", 1)[0].upper()
+        if key in {"SUMMARY", "DTSTART"}:
+            current[key] = (left, value)
     return sorted(events, key=lambda item: item.time_utc)
 
 
+class _BlsTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_row = False
+        self.in_cell = False
+        self.cell_parts: list[str] = []
+        self.row: list[str] = []
+        self.rows: list[list[str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        if tag.lower() == "tr":
+            self.in_row = True
+            self.row = []
+        elif self.in_row and tag.lower() in {"td", "th"}:
+            self.in_cell = True
+            self.cell_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self.in_cell:
+            self.cell_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        lowered = tag.lower()
+        if self.in_row and self.in_cell and lowered in {"td", "th"}:
+            self.row.append(" ".join("".join(self.cell_parts).split()))
+            self.in_cell = False
+            self.cell_parts = []
+        elif self.in_row and lowered == "tr":
+            if self.row:
+                self.rows.append(self.row)
+            self.in_row = False
+            self.row = []
+
+
+def parse_bls_schedule_html(text: str) -> list[EconomicEvent]:
+    """Parse the official BLS monthly List View table as an ICS fallback."""
+    parser = _BlsTableParser()
+    parser.feed(text)
+    events: list[EconomicEvent] = []
+    for row in parser.rows:
+        if len(row) < 3 or row[0].casefold() == "date":
+            continue
+        raw_date, raw_time = row[0].strip(), row[1].strip()
+        name = " ".join(row[2:]).strip()
+        impact = _impact_for_bls(name)
+        if not impact or not raw_time:
+            continue
+        try:
+            day = datetime.strptime(raw_date, "%A, %B %d, %Y").date()
+            release_time = datetime.strptime(raw_time, "%I:%M %p").time()
+        except ValueError:
+            continue
+        event_time = datetime.combine(day, release_time, tzinfo=NEW_YORK).astimezone(UTC)
+        events.append(EconomicEvent(name, "BLS", impact, event_time, "OFFICIAL_HTML"))
+    return sorted(events, key=lambda item: item.time_utc)
+
+
+def _month_sequence(current: datetime, count: int = 2) -> list[tuple[int, int]]:
+    year, month = current.year, current.month
+    result: list[tuple[int, int]] = []
+    for _ in range(count):
+        result.append((year, month))
+        month += 1
+        if month == 13:
+            month = 1
+            year += 1
+    return result
+
+
 def fomc_events() -> list[EconomicEvent]:
-    """Build scheduled FOMC decision markers from the published meeting dates."""
     return [
         EconomicEvent(
-            name="FOMC policy decision",
-            source="Federal Reserve",
-            impact="HIGH",
-            time_utc=datetime.combine(day, time(14, 0), tzinfo=NEW_YORK).astimezone(UTC),
-            timing_quality="STANDARD_14_ET",
+            "FOMC policy decision", "Federal Reserve", "HIGH",
+            datetime.combine(day, time(14, 0), tzinfo=NEW_YORK).astimezone(UTC),
+            "STANDARD_14_ET",
         )
         for day in FOMC_FINAL_DATES
     ]
 
 
 def parse_fred_real_yield(text: str) -> tuple[float, float | None, str]:
-    """Return latest DFII10 value, one-observation change in bp, and date."""
     values: list[tuple[str, float]] = []
     for row in csv.DictReader(io.StringIO(text)):
         raw = str(row.get("DFII10", "")).strip()
@@ -322,13 +301,11 @@ def parse_fred_real_yield(text: str) -> tuple[float, float | None, str]:
         try:
             values.append((day, float(raw)))
         except ValueError:
-            continue
+            pass
     if not values:
         raise ValueError("FRED DFII10 response contains no numeric observations")
     latest_day, latest_value = values[-1]
-    change_bp = None
-    if len(values) >= 2:
-        change_bp = (latest_value - values[-2][1]) * 100.0
+    change_bp = (latest_value - values[-2][1]) * 100.0 if len(values) >= 2 else None
     return latest_value, change_bp, latest_day
 
 
@@ -340,26 +317,27 @@ def _event_to_dict(event: EconomicEvent) -> dict[str, object]:
 
 def _event_from_dict(payload: dict[str, object]) -> EconomicEvent:
     return EconomicEvent(
-        name=str(payload["name"]),
-        source=str(payload["source"]),
-        impact=str(payload["impact"]),
-        time_utc=_parse_iso(str(payload["time_utc"])),
-        timing_quality=str(payload["timing_quality"]),
+        str(payload["name"]), str(payload["source"]), str(payload["impact"]),
+        _parse_iso(str(payload["time_utc"])), str(payload["timing_quality"]),
     )
 
 
-class MarketContextCollector:
-    """Collect local and external context without influencing trade decisions."""
+def _request_headers() -> dict[str, str]:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "Chrome/151 Safari/537.36 MetaTraderAIAssistant/0.3"
+        ),
+        "Accept": "text/html,application/xhtml+xml,text/calendar,text/plain;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.8",
+        "Referer": "https://www.bls.gov/schedule/",
+    }
 
-    def __init__(
-        self,
-        *,
-        mt5_context_path: Path,
-        cache_path: Path = Path("data/market_context_cache.json"),
-        mt5_max_age_seconds: int = 90,
-        external_refresh_minutes: int = 60,
-        timeout_seconds: float = 8.0,
-    ) -> None:
+
+class MarketContextCollector:
+    """Collect context without influencing trade decisions."""
+
+    def __init__(self, *, mt5_context_path: Path, cache_path: Path = Path("data/market_context_cache.json"), mt5_max_age_seconds: int = 90, external_refresh_minutes: int = 60, timeout_seconds: float = 8.0) -> None:
         self.mt5_context_path = mt5_context_path
         self.cache_path = cache_path
         self.mt5_max_age_seconds = mt5_max_age_seconds
@@ -393,41 +371,46 @@ class MarketContextCollector:
     def _refresh_real_yield(self, now: datetime) -> None:
         if self._cache_fresh("real_yield", now):
             return
-        response = httpx.get(
-            FRED_REAL_YIELD_URL,
-            timeout=self.timeout_seconds,
-            follow_redirects=True,
-            headers={
-                "User-Agent": (
-                    "MetaTraderAIAssistant/0.3 read-only research "
-                    f"(+{PROJECT_URL})"
-                )
-            },
-        )
+        response = httpx.get(FRED_REAL_YIELD_URL, timeout=self.timeout_seconds, follow_redirects=True, headers=_request_headers())
         response.raise_for_status()
         value, change_bp, day = parse_fred_real_yield(response.text)
-        self._cache["real_yield"] = {
-            "value": value,
-            "change_bp": change_bp,
-            "date": day,
-        }
+        self._cache["real_yield"] = {"value": value, "change_bp": change_bp, "date": day}
         self._cache["real_yield_fetched_at"] = now.isoformat()
         self._save_cache()
+
+    def _fetch_bls_html_fallback(self, now: datetime) -> list[EconomicEvent]:
+        events: list[EconomicEvent] = []
+        errors: list[str] = []
+        for year, month in _month_sequence(now, 2):
+            url = BLS_MONTH_URL.format(year=year, month=month)
+            try:
+                response = httpx.get(url, timeout=self.timeout_seconds, follow_redirects=True, headers=_request_headers())
+                response.raise_for_status()
+                events.extend(parse_bls_schedule_html(response.text))
+            except httpx.HTTPError as exc:
+                errors.append(f"{year}-{month:02d}: {exc}")
+        unique = {(event.name, event.time_utc): event for event in events}
+        result = sorted(unique.values(), key=lambda item: item.time_utc)
+        if not result:
+            detail = " | ".join(errors) if errors else "no relevant events parsed"
+            raise MarketContextError(f"BLS HTML fallback failed: {detail}")
+        return result
 
     def _refresh_bls(self, now: datetime) -> None:
         if self._cache_fresh("bls", now):
             return
-        response = httpx.get(
-            BLS_CALENDAR_URL,
-            timeout=self.timeout_seconds,
-            follow_redirects=True,
-            headers=BLS_REQUEST_HEADERS,
-        )
-        response.raise_for_status()
-        events = parse_bls_ics(response.text)
-        if not events:
-            raise ValueError("BLS calendar returned no relevant timed releases")
+        source = "ICS"
+        try:
+            response = httpx.get(BLS_CALENDAR_URL, timeout=self.timeout_seconds, follow_redirects=True, headers=_request_headers())
+            response.raise_for_status()
+            events = parse_bls_ics(response.text)
+            if not events:
+                raise MarketContextError("BLS ICS contained no relevant timed releases")
+        except (httpx.HTTPError, MarketContextError):
+            events = self._fetch_bls_html_fallback(now)
+            source = "HTML_FALLBACK"
         self._cache["bls_events"] = [_event_to_dict(event) for event in events]
+        self._cache["bls_source"] = source
         self._cache["bls_fetched_at"] = now.isoformat()
         self._save_cache()
 
@@ -436,69 +419,46 @@ class MarketContextCollector:
         raw = self._cache.get("bls_events", [])
         if isinstance(raw, list):
             for item in raw:
-                if not isinstance(item, dict):
-                    continue
-                try:
-                    result.append(_event_from_dict(item))
-                except (KeyError, ValueError, TypeError):
-                    continue
+                if isinstance(item, dict):
+                    try:
+                        result.append(_event_from_dict(item))
+                    except (KeyError, ValueError, TypeError):
+                        pass
         return sorted(result, key=lambda item: item.time_utc)
 
     def collect(self, *, symbol: str, now: datetime | None = None) -> MarketContextFeatures:
         current = _aware_utc(now or datetime.now(UTC))
         errors: list[str] = []
-
-        h1 = TimeframeFeatures()
-        h4 = TimeframeFeatures()
+        h1, h4 = TimeframeFeatures(), TimeframeFeatures()
         try:
-            h1, h4 = load_mt5_context(
-                self.mt5_context_path,
-                symbol=symbol,
-                max_age_seconds=self.mt5_max_age_seconds,
-                now=current,
-            )
+            h1, h4 = load_mt5_context(self.mt5_context_path, symbol=symbol, max_age_seconds=self.mt5_max_age_seconds, now=current)
         except MarketContextError as exc:
             errors.append(str(exc))
-
         try:
             self._refresh_real_yield(current)
         except (httpx.HTTPError, ValueError, OSError) as exc:
             errors.append(f"FRED: {exc}")
-
         try:
             self._refresh_bls(current)
-        except (httpx.HTTPError, ValueError, OSError) as exc:
+        except (httpx.HTTPError, ValueError, OSError, MarketContextError) as exc:
             errors.append(f"BLS: {exc}")
 
         real_yield = self._cache.get("real_yield", {})
         if not isinstance(real_yield, dict):
             real_yield = {}
-
         future_events = [event for event in self._cached_events() if event.time_utc >= current]
         next_event = future_events[0] if future_events else None
-        minutes_to_event = None
-        if next_event is not None:
-            minutes_to_event = (next_event.time_utc - current).total_seconds() / 60.0
+        minutes_to_event = ((next_event.time_utc - current).total_seconds() / 60.0) if next_event else None
 
         return MarketContextFeatures(
-            h1_trend=h1.trend,
-            h1_volatility=h1.volatility,
-            h1_efficiency_ratio=h1.efficiency_ratio,
-            h1_net_move_atr=h1.net_move_atr,
+            h1_trend=h1.trend, h1_volatility=h1.volatility,
+            h1_efficiency_ratio=h1.efficiency_ratio, h1_net_move_atr=h1.net_move_atr,
             h1_volatility_ratio=h1.volatility_ratio,
-            h4_trend=h4.trend,
-            h4_volatility=h4.volatility,
-            h4_efficiency_ratio=h4.efficiency_ratio,
-            h4_net_move_atr=h4.net_move_atr,
+            h4_trend=h4.trend, h4_volatility=h4.volatility,
+            h4_efficiency_ratio=h4.efficiency_ratio, h4_net_move_atr=h4.net_move_atr,
             h4_volatility_ratio=h4.volatility_ratio,
-            real_yield_10y=(
-                float(real_yield["value"]) if real_yield.get("value") is not None else None
-            ),
-            real_yield_change_bp=(
-                float(real_yield["change_bp"])
-                if real_yield.get("change_bp") is not None
-                else None
-            ),
+            real_yield_10y=float(real_yield["value"]) if real_yield.get("value") is not None else None,
+            real_yield_change_bp=float(real_yield["change_bp"]) if real_yield.get("change_bp") is not None else None,
             real_yield_date=str(real_yield.get("date", "")),
             next_event_name=next_event.name if next_event else "",
             next_event_source=next_event.source if next_event else "",
