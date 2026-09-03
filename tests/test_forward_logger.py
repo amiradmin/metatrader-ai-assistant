@@ -1,7 +1,7 @@
 import csv
 from pathlib import Path
 
-from forward_test_logger import append_once, journal_row, signal_bucket
+from meta_trader_ai.forward_logger import append_once, journal_row, signal_bucket
 
 
 def payload(generated_at: str, action: str = "WAIT") -> dict[str, object]:
