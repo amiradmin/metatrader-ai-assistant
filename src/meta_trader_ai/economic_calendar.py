@@ -111,6 +111,16 @@ def _failure_reason(exc: Exception, url: str) -> str:
     return f"{name} while requesting {url}"
 
 
+def _trust_env_for_attempt(attempt: int) -> bool:
+    """Use normal proxy/env routing first, then retry with a direct connection.
+
+    This matters on developer machines where curl can reach the feed directly
+    but a stale HTTP(S)_PROXY environment variable makes httpx connect to an
+    unreachable proxy. The safety gate stays fail-closed if both paths fail.
+    """
+    return attempt == 1
+
+
 async def fetch_calendar_events(
     url: str,
     *,
@@ -126,6 +136,10 @@ async def fetch_calendar_events(
     A failure cooldown prevents a temporary provider/network outage from making
     every 15-second AutoTrader poll wait on the same failed network request.
     A recent last-known-good calendar remains usable for a bounded period.
+
+    Attempt 1 honors the process proxy/environment settings. Attempt 2 bypasses
+    those settings and tries a direct connection. This mirrors the common case
+    where shell curl works but Python/httpx inherited a broken proxy route.
     """
     now = datetime.now(UTC)
     cached = _cache.get(url)
@@ -162,9 +176,11 @@ async def fetch_calendar_events(
         )
 
         for attempt in range(1, attempts + 1):
+            trust_env = _trust_env_for_attempt(attempt)
             try:
                 async with httpx.AsyncClient(
                     timeout=timeout,
+                    trust_env=trust_env,
                     headers={
                         "User-Agent": "Mozilla/5.0 MT5-AI-Assistant/0.4",
                         "Accept": "application/json,text/plain,*/*",
@@ -176,9 +192,20 @@ async def fetch_calendar_events(
 
                 _cache[url] = _CalendarCache(events=list(events), fetched_at=now)
                 _failures.pop(url, None)
+                if attempt > 1:
+                    logger.info(
+                        "Economic calendar connected on direct fallback after env/proxy route failed."
+                    )
                 return events
             except (httpx.HTTPError, ValueError, EconomicCalendarError) as exc:
                 last_exc = exc
+                logger.warning(
+                    "Economic calendar attempt %d/%d failed (trust_env=%s): %s",
+                    attempt,
+                    attempts,
+                    trust_env,
+                    _failure_reason(exc, url),
+                )
                 if attempt < attempts:
                     await asyncio.sleep(0.75 * attempt)
 
