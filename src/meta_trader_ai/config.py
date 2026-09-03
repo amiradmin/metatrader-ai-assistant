@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     max_risk_percent: float = 0.5
     news_lookback_hours: int = 24
     high_impact_block_minutes: int = 30
+    tipranks_context_enabled: bool = True
+    tipranks_context_path: Path = Path("data/tipranks_context.json")
+    tipranks_context_max_age_minutes: int = 30
     news_rss_urls: str = (
         "https://www.federalreserve.gov/feeds/press_all.xml,"
         "https://www.bls.gov/feed/bls_latest.rss,"
