@@ -7,15 +7,30 @@ input string ApiUrl = "http://127.0.0.1:8000/hint";
 input int RefreshSeconds = 15;
 input int RequestTimeoutMs = 45000;
 input int TradesPerSignal = 1;
-input int MaxOpenTrades = 3;
+input int MaxOpenTrades = 1;
 input int MinConfidence = 75;
+
+// Anti-chase entry timing. Direction still comes only from the M15 API signal.
+input bool UseChasingFilter = true;
+input double MaxExtensionAtr = 1.50;
+input double PullbackZoneAtr = 0.35;
+input int PullbackMaxBars = 4;
+
+// After an overextended move, use a confirmed lower-timeframe swing for a
+// precision stop if the pullback/reclaim trigger occurs.
+input bool UsePullbackPrecisionStop = true;
+input ENUM_TIMEFRAMES PullbackStopTimeframe = PERIOD_M5;
+input int PullbackStopLookbackBars = 30;
+input int PullbackStopLeftBars = 2;
+input int PullbackStopRightBars = 2;
+input int PullbackStopBufferPoints = 30;
 
 // Risk model: 0.5% is also enforced as a hard ceiling in code.
 input bool UseRiskBasedSizing = true;
 input double RiskPercent = 0.5;
 input double FallbackLotSize = 0.01;
 
-// Dynamic protective stop: completed M15 ATR plus the latest confirmed M15 swing.
+// Dynamic protective stop for normal (non-pullback) entries.
 input bool UseDynamicStop = true;
 input int AtrPeriod = 14;
 input double AtrMultiplier = 1.50;
@@ -41,6 +56,10 @@ const double HARD_MAX_RISK_PERCENT = 0.5;
 CTrade Trade;
 datetime LastExecutedM15Bar = 0;
 int AtrHandle = INVALID_HANDLE;
+int Ema9Handle = INVALID_HANDLE;
+int Ema21Handle = INVALID_HANDLE;
+string PendingPullbackAction = "";
+datetime PendingPullbackStartedBar = 0;
 
 string JsonValue(const string json, const string key)
 {
@@ -83,7 +102,8 @@ string JsonValue(const string json, const string key)
 
 bool IsDemoAccount()
 {
-   ENUM_ACCOUNT_TRADE_MODE mode = (ENUM_ACCOUNT_TRADE_MODE)AccountInfoInteger(ACCOUNT_TRADE_MODE);
+   ENUM_ACCOUNT_TRADE_MODE mode =
+      (ENUM_ACCOUNT_TRADE_MODE)AccountInfoInteger(ACCOUNT_TRADE_MODE);
    return mode == ACCOUNT_TRADE_MODE_DEMO;
 }
 
@@ -195,8 +215,7 @@ bool FetchHint(string &action, int &confidence, string &symbol, string &news_ris
    action = JsonValue(response, "action");
    symbol = JsonValue(response, "symbol");
    news_risk = JsonValue(response, "news_risk");
-   string confidence_text = JsonValue(response, "confidence");
-   confidence = (int)StringToInteger(confidence_text);
+   confidence = (int)StringToInteger(JsonValue(response, "confidence"));
 
    return action != "" && symbol != "";
 }
@@ -211,45 +230,192 @@ bool TradeResultAccepted()
    );
 }
 
-bool GetCompletedM15Atr(double &atr_price)
+bool GetCompletedIndicatorValue(const int handle, double &value)
 {
-   atr_price = 0.0;
-   if(AtrHandle == INVALID_HANDLE)
+   value = 0.0;
+   if(handle == INVALID_HANDLE)
       return false;
 
    double values[];
    ArraySetAsSeries(values, true);
-   // shift=1 means the still-forming M15 candle cannot change the stop plan.
-   if(CopyBuffer(AtrHandle, 0, 1, 1, values) != 1)
+   // shift=1: entry timing and stop logic never use a forming M15 indicator bar.
+   if(CopyBuffer(handle, 0, 1, 1, values) != 1)
       return false;
 
-   atr_price = values[0];
-   return atr_price > 0.0;
+   value = values[0];
+   return value > 0.0;
 }
 
-bool FindRecentConfirmedSwing(const string action, double &swing_price)
+bool GetCompletedM15Atr(double &atr_price)
 {
-   swing_price = 0.0;
-   if(SwingLookbackBars < SwingLeftBars + SwingRightBars + 3)
+   return GetCompletedIndicatorValue(AtrHandle, atr_price);
+}
+
+void ResetPendingPullback(const string reason)
+{
+   if(PendingPullbackAction != "" && VerboseLogging && reason != "")
+      Print(
+         "DemoAutoTrader pullback reset: action=", PendingPullbackAction,
+         " reason=", reason
+      );
+
+   PendingPullbackAction = "";
+   PendingPullbackStartedBar = 0;
+}
+
+void StartPendingPullback(
+   const string action,
+   const datetime current_bar,
+   const double extension_atr
+)
+{
+   PendingPullbackAction = action;
+   PendingPullbackStartedBar = current_bar;
+   Print(
+      "DemoAutoTrader anti-chase: ", action,
+      " extension=", DoubleToString(extension_atr, 2),
+      " ATR > limit ", DoubleToString(MaxExtensionAtr, 2),
+      "; waiting for pullback/reclaim near completed M15 EMA9."
+   );
+}
+
+bool PendingPullbackExpired(const datetime current_bar)
+{
+   if(PendingPullbackStartedBar <= 0 || current_bar <= 0)
+      return true;
+
+   int shift = iBarShift(_Symbol, PERIOD_M15, PendingPullbackStartedBar, false);
+   if(shift < 0)
+      return true;
+   return shift > PullbackMaxBars;
+}
+
+bool EntryTimingAllows(
+   const string action,
+   const datetime current_bar,
+   bool &pullback_reentry
+)
+{
+   pullback_reentry = false;
+   if(!UseChasingFilter)
+      return true;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick))
       return false;
 
-   int first_shift = SwingRightBars + 1;
-   int last_shift = SwingLookbackBars;
-
-   for(int shift = first_shift; shift <= last_shift; shift++)
+   double atr = 0.0;
+   double ema9 = 0.0;
+   double ema21 = 0.0;
+   if(
+      !GetCompletedM15Atr(atr)
+      || !GetCompletedIndicatorValue(Ema9Handle, ema9)
+      || !GetCompletedIndicatorValue(Ema21Handle, ema21)
+   )
    {
-      double candidate = (action == "BUY")
-         ? iLow(_Symbol, PERIOD_M15, shift)
-         : iHigh(_Symbol, PERIOD_M15, shift);
+      Print("DemoAutoTrader skipped: M15 ATR/EMA entry context is unavailable.");
+      return false;
+   }
+
+   double entry = action == "BUY" ? tick.ask : tick.bid;
+   double extension_atr = action == "BUY"
+      ? (entry - ema21) / atr
+      : (ema21 - entry) / atr;
+
+   if(PendingPullbackAction != "" && PendingPullbackAction != action)
+      ResetPendingPullback("API direction changed");
+
+   if(PendingPullbackAction == "")
+   {
+      if(extension_atr > MaxExtensionAtr)
+      {
+         StartPendingPullback(action, current_bar, extension_atr);
+         return false;
+      }
+      return true;
+   }
+
+   if(PendingPullbackExpired(current_bar))
+   {
+      ResetPendingPullback("pullback window expired");
+      if(extension_atr > MaxExtensionAtr)
+         StartPendingPullback(action, current_bar, extension_atr);
+      return false;
+   }
+
+   if(extension_atr > MaxExtensionAtr)
+   {
+      if(VerboseLogging)
+         Print(
+            "DemoAutoTrader pullback pending: still extended ",
+            DoubleToString(extension_atr, 2), " ATR."
+         );
+      return false;
+   }
+
+   bool trend_aligned = action == "BUY" ? ema9 > ema21 : ema9 < ema21;
+   double reclaim_distance_atr = action == "BUY"
+      ? (entry - ema9) / atr
+      : (ema9 - entry) / atr;
+   bool reclaimed = action == "BUY"
+      ? (entry >= ema9 && entry >= ema21)
+      : (entry <= ema9 && entry <= ema21);
+   bool in_zone = reclaim_distance_atr >= 0.0
+      && reclaim_distance_atr <= PullbackZoneAtr;
+
+   if(trend_aligned && reclaimed && in_zone)
+   {
+      pullback_reentry = true;
+      Print(
+         "DemoAutoTrader pullback READY: action=", action,
+         " extension=", DoubleToString(extension_atr, 2),
+         " ATR ema9_reclaim_distance=", DoubleToString(reclaim_distance_atr, 2),
+         " ATR. Precision entry enabled."
+      );
+      ResetPendingPullback("");
+      return true;
+   }
+
+   if(VerboseLogging)
+      Print(
+         "DemoAutoTrader pullback pending: action=", action,
+         " extension=", DoubleToString(extension_atr, 2),
+         " ATR ema9_distance=", DoubleToString(reclaim_distance_atr, 2),
+         " zone<=", DoubleToString(PullbackZoneAtr, 2),
+         " trend_aligned=", trend_aligned ? "yes" : "no",
+         " reclaimed=", reclaimed ? "yes" : "no"
+      );
+   return false;
+}
+
+bool FindRecentConfirmedSwingAt(
+   const string action,
+   const ENUM_TIMEFRAMES timeframe,
+   const int lookback_bars,
+   const int left_bars,
+   const int right_bars,
+   double &swing_price
+)
+{
+   swing_price = 0.0;
+   if(lookback_bars < left_bars + right_bars + 3)
+      return false;
+
+   int first_shift = right_bars + 1;
+   for(int shift = first_shift; shift <= lookback_bars; shift++)
+   {
+      double candidate = action == "BUY"
+         ? iLow(_Symbol, timeframe, shift)
+         : iHigh(_Symbol, timeframe, shift);
       if(candidate <= 0.0)
          continue;
 
       bool confirmed = true;
-      for(int offset = 1; offset <= SwingLeftBars && confirmed; offset++)
+      for(int offset = 1; offset <= left_bars && confirmed; offset++)
       {
-         double older = (action == "BUY")
-            ? iLow(_Symbol, PERIOD_M15, shift + offset)
-            : iHigh(_Symbol, PERIOD_M15, shift + offset);
+         double older = action == "BUY"
+            ? iLow(_Symbol, timeframe, shift + offset)
+            : iHigh(_Symbol, timeframe, shift + offset);
          if(older <= 0.0)
          {
             confirmed = false;
@@ -261,11 +427,11 @@ bool FindRecentConfirmedSwing(const string action, double &swing_price)
             confirmed = false;
       }
 
-      for(int offset = 1; offset <= SwingRightBars && confirmed; offset++)
+      for(int offset = 1; offset <= right_bars && confirmed; offset++)
       {
-         double newer = (action == "BUY")
-            ? iLow(_Symbol, PERIOD_M15, shift - offset)
-            : iHigh(_Symbol, PERIOD_M15, shift - offset);
+         double newer = action == "BUY"
+            ? iLow(_Symbol, timeframe, shift - offset)
+            : iHigh(_Symbol, timeframe, shift - offset);
          if(newer <= 0.0)
          {
             confirmed = false;
@@ -286,9 +452,63 @@ bool FindRecentConfirmedSwing(const string action, double &swing_price)
    return false;
 }
 
+bool PrecisionPullbackStopPoints(
+   const string action,
+   const double entry,
+   double &stop_points
+)
+{
+   stop_points = 0.0;
+   if(!UsePullbackPrecisionStop)
+      return false;
+
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0)
+      return false;
+
+   double swing_price = 0.0;
+   if(!FindRecentConfirmedSwingAt(
+      action,
+      PullbackStopTimeframe,
+      PullbackStopLookbackBars,
+      PullbackStopLeftBars,
+      PullbackStopRightBars,
+      swing_price
+   ))
+      return false;
+
+   double buffered_swing = action == "BUY"
+      ? swing_price - PullbackStopBufferPoints * point
+      : swing_price + PullbackStopBufferPoints * point;
+   double distance_points = action == "BUY"
+      ? (entry - buffered_swing) / point
+      : (buffered_swing - entry) / point;
+   if(distance_points <= 0.0)
+      return false;
+
+   long broker_stops = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   distance_points = MathMax(distance_points, (double)MinStopPoints);
+   distance_points = MathMax(distance_points, (double)broker_stops + 5.0);
+
+   if(MaxStopPoints > 0 && distance_points > MaxStopPoints)
+   {
+      if(VerboseLogging)
+         Print(
+            "DemoAutoTrader precision stop rejected: ",
+            DoubleToString(distance_points, 0),
+            " points > MaxStopPoints ", MaxStopPoints, "."
+         );
+      return false;
+   }
+
+   stop_points = distance_points;
+   return true;
+}
+
 bool BuildTradePlan(
    const string action,
    const MqlTick &tick,
+   const bool pullback_reentry,
    double &entry,
    double &stop,
    double &target,
@@ -327,62 +547,79 @@ bool BuildTradePlan(
       return true;
    }
 
-   double atr_price = 0.0;
-   if(!GetCompletedM15Atr(atr_price))
+   // A chase-blocked signal may re-enter only after pullback/reclaim. For that
+   // case, prefer the latest confirmed M5 (configurable) swing so the stop can
+   // be materially tighter than a full M15 ATR stop while still being structural.
+   if(pullback_reentry && PrecisionPullbackStopPoints(action, entry, stop_points))
    {
-      Print("DemoAutoTrader skipped: completed M15 ATR is unavailable.");
-      return false;
+      stop_source = "PULLBACK_" + EnumToString(PullbackStopTimeframe) + "_SWING";
    }
-
-   double atr_points = (atr_price * AtrMultiplier) / point;
-   double required_points = MathMax((double)MinStopPoints, atr_points);
-   stop_source = "ATR";
-
-   double swing_price = 0.0;
-   if(FindRecentConfirmedSwing(action, swing_price))
+   else
    {
-      double buffered_swing = action == "BUY"
-         ? swing_price - StructureBufferPoints * point
-         : swing_price + StructureBufferPoints * point;
-      double structure_points = action == "BUY"
-         ? (entry - buffered_swing) / point
-         : (buffered_swing - entry) / point;
-
-      if(structure_points > 0.0)
+      double atr_price = 0.0;
+      if(!GetCompletedM15Atr(atr_price))
       {
-         if(MaxStopPoints <= 0 || structure_points <= MaxStopPoints)
+         Print("DemoAutoTrader skipped: completed M15 ATR is unavailable.");
+         return false;
+      }
+
+      double atr_points = (atr_price * AtrMultiplier) / point;
+      double required_points = MathMax((double)MinStopPoints, atr_points);
+      stop_source = "ATR";
+
+      double swing_price = 0.0;
+      if(FindRecentConfirmedSwingAt(
+         action,
+         PERIOD_M15,
+         SwingLookbackBars,
+         SwingLeftBars,
+         SwingRightBars,
+         swing_price
+      ))
+      {
+         double buffered_swing = action == "BUY"
+            ? swing_price - StructureBufferPoints * point
+            : swing_price + StructureBufferPoints * point;
+         double structure_points = action == "BUY"
+            ? (entry - buffered_swing) / point
+            : (buffered_swing - entry) / point;
+
+         if(structure_points > 0.0)
          {
-            if(structure_points > required_points)
+            if(MaxStopPoints <= 0 || structure_points <= MaxStopPoints)
             {
-               required_points = structure_points;
-               stop_source = "ATR+SWING";
+               if(structure_points > required_points)
+               {
+                  required_points = structure_points;
+                  stop_source = "ATR+M15_SWING";
+               }
+            }
+            else if(VerboseLogging)
+            {
+               Print(
+                  "DemoAutoTrader structure observer: recent M15 swing requires ",
+                  DoubleToString(structure_points, 0),
+                  " points > MaxStopPoints ", MaxStopPoints,
+                  "; ATR stop retained."
+               );
             }
          }
-         else if(VerboseLogging)
-         {
-            Print(
-               "DemoAutoTrader structure observer: recent swing requires ",
-               DoubleToString(structure_points, 0),
-               " points > MaxStopPoints ", MaxStopPoints,
-               "; ATR stop retained."
-            );
-         }
       }
+
+      long broker_stops = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+      required_points = MathMax(required_points, (double)broker_stops + 5.0);
+      if(MaxStopPoints > 0 && required_points > MaxStopPoints)
+      {
+         Print(
+            "DemoAutoTrader skipped: dynamic stop ",
+            DoubleToString(required_points, 0),
+            " points exceeds MaxStopPoints ", MaxStopPoints, "."
+         );
+         return false;
+      }
+      stop_points = required_points;
    }
 
-   long broker_stops = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   required_points = MathMax(required_points, (double)broker_stops + 5.0);
-
-   if(MaxStopPoints > 0 && required_points > MaxStopPoints)
-   {
-      Print(
-         "DemoAutoTrader skipped: dynamic stop ", DoubleToString(required_points, 0),
-         " points exceeds MaxStopPoints ", MaxStopPoints, "."
-      );
-      return false;
-   }
-
-   stop_points = required_points;
    double target_points = stop_points * RewardRiskRatio;
    if(action == "BUY")
    {
@@ -438,7 +675,8 @@ double RiskSizedVolume(
    {
       Print(
          "DemoAutoTrader skipped: broker minimum lot would exceed risk budget $",
-         DoubleToString(risk_budget, 2), "."
+         DoubleToString(risk_budget, 2),
+         "; required raw volume=", DoubleToString(raw_volume, 4), "."
       );
       return 0.0;
    }
@@ -447,7 +685,11 @@ double RiskSizedVolume(
    return volume;
 }
 
-bool OpenManagedTrade(const string action, const int trades_to_open)
+bool OpenManagedTrade(
+   const string action,
+   const int trades_to_open,
+   const bool pullback_reentry
+)
 {
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick))
@@ -458,7 +700,16 @@ bool OpenManagedTrade(const string action, const int trades_to_open)
    double tp = 0.0;
    double stop_points = 0.0;
    string stop_source = "";
-   if(!BuildTradePlan(action, tick, entry, sl, tp, stop_points, stop_source))
+   if(!BuildTradePlan(
+      action,
+      tick,
+      pullback_reentry,
+      entry,
+      sl,
+      tp,
+      stop_points,
+      stop_source
+   ))
       return false;
 
    double risk_budget = 0.0;
@@ -478,6 +729,7 @@ bool OpenManagedTrade(const string action, const int trades_to_open)
    {
       Print(
          "DemoAutoTrader plan: action=", action,
+         " entry_type=", pullback_reentry ? "PULLBACK" : "NORMAL",
          " stop_source=", stop_source,
          " stop_points=", DoubleToString(stop_points, 0),
          " RR=", DoubleToString(RewardRiskRatio, 2),
@@ -491,17 +743,22 @@ bool OpenManagedTrade(const string action, const int trades_to_open)
 
    bool request_ok = false;
    if(action == "BUY")
-      request_ok = Trade.Buy(volume, _Symbol, 0.0, sl, tp, "M15 AI DEMO RISK");
+      request_ok = Trade.Buy(volume, _Symbol, 0.0, sl, tp, "M15 AI PULLBACK/RISK");
    else if(action == "SELL")
-      request_ok = Trade.Sell(volume, _Symbol, 0.0, sl, tp, "M15 AI DEMO RISK");
+      request_ok = Trade.Sell(volume, _Symbol, 0.0, sl, tp, "M15 AI PULLBACK/RISK");
    else
       return false;
 
    if(!request_ok || !TradeResultAccepted())
+   {
+      Print(
+         "DemoAutoTrader order failed. retcode=", Trade.ResultRetcode(),
+         " ", Trade.ResultRetcodeDescription()
+      );
       return false;
+   }
 
    if(VerboseLogging)
-   {
       Print(
          "DemoAutoTrader order accepted: action=", action,
          " volume=", DoubleToString(volume, 3),
@@ -510,13 +767,11 @@ bool OpenManagedTrade(const string action, const int trades_to_open)
          " retcode=", Trade.ResultRetcode(),
          " ", Trade.ResultRetcodeDescription()
       );
-   }
    return true;
 }
 
 void EvaluateAndTrade()
 {
-   // Hard safety lock: never trade a real/contest account.
    if(!IsDemoAccount())
    {
       Print("DemoAutoTrader BLOCKED: account is not DEMO.");
@@ -543,7 +798,6 @@ void EvaluateAndTrade()
 
    long spread_points = CurrentSpreadPoints();
    if(VerboseLogging)
-   {
       Print(
          "DemoAutoTrader signal: action=", action,
          " confidence=", confidence,
@@ -554,31 +808,32 @@ void EvaluateAndTrade()
          " open=", ManagedOpenPositions(),
          "/", MaxOpenTrades
       );
-   }
 
    if(symbol != _Symbol)
    {
+      ResetPendingPullback("symbol mismatch");
       Print("DemoAutoTrader skipped: API symbol ", symbol, " != chart symbol ", _Symbol);
       return;
    }
 
-   // Confidence alone never creates a direction: the API must explicitly return BUY/SELL.
    if(action != "BUY" && action != "SELL")
    {
+      ResetPendingPullback("API action is not directional");
       if(VerboseLogging)
          Print("DemoAutoTrader skipped: API action is ", action, ".");
       return;
    }
 
-   // Exact threshold is allowed: confidence == MinConfidence passes.
    if(confidence < MinConfidence)
    {
+      ResetPendingPullback("confidence fell below threshold");
       Print("DemoAutoTrader skipped: confidence ", confidence, " < ", MinConfidence);
       return;
    }
 
    if(news_risk == "HIGH")
    {
+      ResetPendingPullback("HIGH news risk");
       Print("DemoAutoTrader skipped: HIGH news risk.");
       return;
    }
@@ -601,6 +856,10 @@ void EvaluateAndTrade()
       return;
    }
 
+   bool pullback_reentry = false;
+   if(!EntryTimingAllows(action, current_bar, pullback_reentry))
+      return;
+
    int requested = MathMax(1, TradesPerSignal);
    int to_open = MathMin(requested, capacity);
    int opened = 0;
@@ -612,26 +871,28 @@ void EvaluateAndTrade()
 
    for(int i = 0; i < to_open; i++)
    {
-      if(OpenManagedTrade(action, to_open))
+      if(OpenManagedTrade(action, to_open, pullback_reentry))
       {
          opened++;
-         Print("DemoAutoTrader opened ", action, " #", opened, " confidence=", confidence);
+         Print(
+            "DemoAutoTrader opened ", action,
+            " #", opened,
+            " confidence=", confidence,
+            " entry_type=", pullback_reentry ? "PULLBACK" : "NORMAL"
+         );
       }
       else
       {
-         Print(
-            "DemoAutoTrader order not opened. retcode=",
-            Trade.ResultRetcode(),
-            " ",
-            Trade.ResultRetcodeDescription()
-         );
+         Print("DemoAutoTrader trade plan/order not opened; see prior log line(s).");
          break;
       }
    }
 
-   // Mark the bar only after the broker reports an accepted trade result.
    if(opened > 0)
+   {
       LastExecutedM15Bar = current_bar;
+      ResetPendingPullback("");
+   }
 }
 
 int OnInit()
@@ -650,6 +911,15 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    if(SwingLeftBars < 1 || SwingRightBars < 1)
       return INIT_PARAMETERS_INCORRECT;
+   if(MaxExtensionAtr <= 0.0 || PullbackZoneAtr < 0.0 || PullbackMaxBars < 1)
+      return INIT_PARAMETERS_INCORRECT;
+   if(
+      PullbackStopLookbackBars < PullbackStopLeftBars + PullbackStopRightBars + 3
+      || PullbackStopLeftBars < 1
+      || PullbackStopRightBars < 1
+      || PullbackStopBufferPoints < 0
+   )
+      return INIT_PARAMETERS_INCORRECT;
 
    if(!IsDemoAccount())
    {
@@ -657,12 +927,23 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   if(UseDynamicStop)
+   if(UseDynamicStop || UseChasingFilter)
    {
       AtrHandle = iATR(_Symbol, PERIOD_M15, AtrPeriod);
       if(AtrHandle == INVALID_HANDLE)
       {
          Print("DemoAutoTrader init failed: could not create M15 ATR handle.");
+         return INIT_FAILED;
+      }
+   }
+
+   if(UseChasingFilter)
+   {
+      Ema9Handle = iMA(_Symbol, PERIOD_M15, 9, 0, MODE_EMA, PRICE_CLOSE);
+      Ema21Handle = iMA(_Symbol, PERIOD_M15, 21, 0, MODE_EMA, PRICE_CLOSE);
+      if(Ema9Handle == INVALID_HANDLE || Ema21Handle == INVALID_HANDLE)
+      {
+         Print("DemoAutoTrader init failed: could not create M15 EMA handles.");
          return INIT_FAILED;
       }
    }
@@ -674,10 +955,13 @@ int OnInit()
    EventSetTimer(RefreshSeconds);
    Print(
       "DemoAutoTrader ready on DEMO account. Symbol=", _Symbol,
-      " M15-first. MinConfidence=", MinConfidence,
+      " M15-first; chart_tf=", EnumToString((ENUM_TIMEFRAMES)_Period),
+      " MinConfidence=", MinConfidence,
       " risk=", DoubleToString(MathMin(RiskPercent, HARD_MAX_RISK_PERCENT), 2), "%",
-      " dynamic_stop=", UseDynamicStop ? "ON" : "OFF",
-      ". Exact threshold is eligible when API action is BUY/SELL."
+      " anti_chase=", UseChasingFilter ? "ON" : "OFF",
+      " max_extension=", DoubleToString(MaxExtensionAtr, 2), " ATR",
+      " pullback_zone=", DoubleToString(PullbackZoneAtr, 2), " ATR",
+      " dynamic_stop=", UseDynamicStop ? "ON" : "OFF"
    );
    return INIT_SUCCEEDED;
 }
@@ -690,9 +974,21 @@ void OnTimer()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   ResetPendingPullback("");
+
    if(AtrHandle != INVALID_HANDLE)
    {
       IndicatorRelease(AtrHandle);
       AtrHandle = INVALID_HANDLE;
+   }
+   if(Ema9Handle != INVALID_HANDLE)
+   {
+      IndicatorRelease(Ema9Handle);
+      Ema9Handle = INVALID_HANDLE;
+   }
+   if(Ema21Handle != INVALID_HANDLE)
+   {
+      IndicatorRelease(Ema21Handle);
+      Ema21Handle = INVALID_HANDLE;
    }
 }
