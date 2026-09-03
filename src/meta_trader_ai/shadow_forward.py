@@ -11,6 +11,9 @@ Frozen candidate:
 - 4-bar momentum must be >= 1.50 and < 2.00 ATR
 - one shadow position at a time
 - default SL=300 points, TP=600 points, point size=0.01
+
+H1/H4, real-yield and economic-calendar context is logged to a separate CSV.
+Those context fields are observational only and cannot change eligibility.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from uuid import uuid4
 
 from meta_trader_ai.bridge import SnapshotError, load_snapshot
 from meta_trader_ai.config import settings
+from meta_trader_ai.market_context import MarketContextCollector, MarketContextFeatures
 from meta_trader_ai.models import Action, MarketSnapshot
 from meta_trader_ai.regime import TrendRegime, VolatilityRegime, classify_regime
 from meta_trader_ai.signals import _atr, build_hint
@@ -181,6 +185,52 @@ def _record_observation(path: Path, decision: ShadowDecision) -> None:
     _append_csv(path, fields, row)
 
 
+def _record_market_context(
+    path: Path,
+    decision: ShadowDecision,
+    context: MarketContextFeatures,
+) -> None:
+    """Persist observational context separately so the frozen strategy stays clean."""
+    row = asdict(context)
+    row.update(
+        {
+            "observed_at_utc": datetime.now(UTC).isoformat(),
+            "bucket": decision.bucket,
+            "symbol": decision.symbol,
+            "shadow_eligible": decision.eligible,
+            "m15_momentum_4_atr": f"{decision.momentum_4_atr:.6f}",
+        }
+    )
+    fields = [
+        "observed_at_utc",
+        "bucket",
+        "symbol",
+        "shadow_eligible",
+        "m15_momentum_4_atr",
+        "h1_trend",
+        "h1_volatility",
+        "h1_efficiency_ratio",
+        "h1_net_move_atr",
+        "h1_volatility_ratio",
+        "h4_trend",
+        "h4_volatility",
+        "h4_efficiency_ratio",
+        "h4_net_move_atr",
+        "h4_volatility_ratio",
+        "real_yield_10y",
+        "real_yield_change_bp",
+        "real_yield_date",
+        "next_event_name",
+        "next_event_source",
+        "next_event_impact",
+        "next_event_utc",
+        "minutes_to_event",
+        "event_timing_quality",
+        "context_errors",
+    ]
+    _append_csv(path, fields, row)
+
+
 def _record_trade_event(
     path: Path,
     *,
@@ -235,6 +285,21 @@ def main() -> None:
     parser.add_argument("--sl-points", type=float, default=300.0)
     parser.add_argument("--tp-points", type=float, default=600.0)
     parser.add_argument("--observations", type=Path, default=Path("data/shadow_observations.csv"))
+    parser.add_argument(
+        "--context-observations",
+        type=Path,
+        default=Path("data/shadow_context.csv"),
+    )
+    parser.add_argument(
+        "--mt5-context",
+        type=Path,
+        default=settings.mt5_snapshot_path.with_name("mt5_context.json"),
+    )
+    parser.add_argument(
+        "--context-cache",
+        type=Path,
+        default=Path("data/market_context_cache.json"),
+    )
     parser.add_argument("--trades", type=Path, default=Path("data/shadow_trades.csv"))
     parser.add_argument("--state", type=Path, default=Path("data/shadow_state.json"))
     args = parser.parse_args()
@@ -244,10 +309,15 @@ def main() -> None:
     if stop_distance <= 0 or target_distance <= 0:
         raise SystemExit("SL/TP and point size must be positive")
 
+    context_collector = MarketContextCollector(
+        mt5_context_path=args.mt5_context,
+        cache_path=args.context_cache,
+    )
     last_bucket, active = _load_state(args.state)
     first_fresh_snapshot = last_bucket is None
     print("Frozen shadow candidate: BUY + UP trend + LOW volatility + momentum 1.50-2.00 ATR")
     print("No broker orders are sent. /hint and execution EAs are unchanged.")
+    print("Observer context: H1/H4 + FRED DFII10 + BLS/FOMC calendar (no decision impact).")
 
     while True:
         try:
@@ -295,7 +365,30 @@ def main() -> None:
                     print(f"warm-up bucket {decision.bucket}; waiting for next M15 boundary")
                 else:
                     _record_observation(args.observations, decision)
+                    context = context_collector.collect(
+                        symbol=decision.symbol,
+                        now=snapshot.generated_at,
+                    )
+                    _record_market_context(args.context_observations, decision, context)
                     last_bucket = decision.bucket
+
+                    event_text = "none"
+                    if context.next_event_name:
+                        event_text = (
+                            f"{context.next_event_name} in "
+                            f"{context.minutes_to_event:.0f}m"
+                            if context.minutes_to_event is not None
+                            else context.next_event_name
+                        )
+                    print(
+                        "context "
+                        f"H1={context.h1_trend} H4={context.h4_trend} "
+                        f"realYield={context.real_yield_10y} "
+                        f"next={event_text}"
+                    )
+                    if context.context_errors:
+                        print(f"context warning: {context.context_errors}")
+
                     if decision.eligible and active is None:
                         active = ActiveTrade(
                             trade_id=uuid4().hex[:12],
