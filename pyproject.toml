@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 simulate-yesterday = "meta_trader_ai.simulate_yesterday:main"
+compare-yesterday = "meta_trader_ai.compare_yesterday:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<9", "pytest-asyncio>=0.25,<1", "ruff>=0.9,<1"]
