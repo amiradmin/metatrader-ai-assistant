@@ -10,13 +10,46 @@ A new order still requires all of the existing gates:
 - confidence is at least `MinConfidence` (default 75)
 - news risk is not `HIGH`
 - spread is at or below `MaxSpreadPoints`
+- API-level spread/ATR execution quality is at or below `MAX_SPREAD_ATR_RATIO` (default 0.25 ATR)
+- daily account loss budget has enough room for one more full-risk trade
 - Algo Trading is enabled
 - API symbol matches the chart symbol
 - managed open positions are below `MaxOpenTrades`
 
+## Account-level daily loss circuit breaker
+
+`ReadOnlySnapshotBridge.mq5` now exports broker-day account risk metrics from MT5 deal history:
+
+- `day_realized_pnl`: realized trading P/L for the current broker day, including profit, commission, swap and deal fees
+- `day_start_balance`: reconstructed broker-day starting balance (`current balance - day realized P/L`)
+
+The API compares broker-day start balance with current equity so unrealized drawdown is also visible to the guard.
+
+Default limits:
+
+```text
+MAX_RISK_PERCENT = 0.5
+MAX_DAILY_LOSS_PERCENT = 1.5
+```
+
+A directional hint is changed to `WAIT` when either:
+
+1. current day drawdown is already at or above 1.5%, or
+2. current day drawdown plus the maximum 0.5% risk of the next trade would exceed 1.5%.
+
+This is intentionally conservative: it reserves enough remaining daily loss budget for the full planned stop before allowing another entry.
+
+If the running MT5 bridge has not yet been recompiled with the new fields, the daily-loss guard reports `UNAVAILABLE` and does not invent a loss state. This keeps backward compatibility while making the missing risk telemetry explicit.
+
+## Execution-quality hard gate
+
+The API also measures current spread relative to completed M15 ATR. `MAX_SPREAD_ATR_RATIO=0.25` is the default hard ceiling.
+
+If a directional signal survives the normal confidence/news checks but spread is greater than 0.25 ATR, the action is changed to `WAIT`. This complements the EA's broker-specific `MaxSpreadPoints` check with a volatility-normalized execution check.
+
 ## Position sizing
 
-The default sizing is now risk-based instead of a fixed 0.01 lot.
+The default sizing is risk-based instead of a fixed 0.01 lot.
 
 - `UseRiskBasedSizing=true`
 - `RiskPercent=0.5`
@@ -56,16 +89,20 @@ MinStopPoints = 150
 MaxStopPoints = 1200
 RewardRiskRatio = 2.0
 MaxSpreadPoints = 50
+MAX_DAILY_LOSS_PERCENT = 1.5
+MAX_SPREAD_ATR_RATIO = 0.25
 ```
 
-## Logging
+## Logging and API visibility
 
-With `VerboseLogging=true`, the Experts tab reports the signal gate and the planned order, including stop source, stop distance, volume, risk budget, approximate planned loss, SL and TP.
+The `/hint` payload now exposes:
 
-Example:
+- `risk_guard_status`
+- `day_drawdown_percent`
+- `spread_to_atr`
 
-```text
-DemoAutoTrader plan: action=BUY stop_source=ATR+SWING stop_points=... RR=2.00 volume=... risk_budget=$... planned_loss~$... SL=... TP=...
-```
+The `reasons` list explains exactly why an entry was allowed or changed to `WAIT`.
+
+With `VerboseLogging=true`, the Experts tab continues to report the signal gate and the planned order, including stop source, stop distance, volume, risk budget, approximate planned loss, SL and TP.
 
 This logic is intended for demo forward-testing. It does not make confidence a probability of winning and does not make the strategy profitable by itself; expectancy must still be measured over a meaningful sample of trades.
