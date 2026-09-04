@@ -1,21 +1,15 @@
 """Shared domain models."""
 
-
 from datetime import datetime
 from enum import StrEnum
 
-
 from pydantic import BaseModel, Field
-
-
 
 
 class Action(StrEnum):
     BUY = "BUY"
     SELL = "SELL"
     WAIT = "WAIT"
-
-
 
 
 class NewsRisk(StrEnum):
@@ -31,8 +25,6 @@ class NewsCoverage(StrEnum):
     UNAVAILABLE = "UNAVAILABLE"
 
 
-
-
 class MarketSnapshot(BaseModel):
     symbol: str
     timeframe: str
@@ -42,12 +34,12 @@ class MarketSnapshot(BaseModel):
     balance: float
     equity: float
     positions_total: int = 0
+    day_start_balance: float | None = Field(default=None, gt=0)
+    day_realized_pnl: float | None = None
     opens: list[float] = Field(default_factory=list)
     highs: list[float] = Field(default_factory=list)
     lows: list[float] = Field(default_factory=list)
     closes: list[float] = Field(min_length=20)
-
-
 
 
 class NewsItem(BaseModel):
@@ -59,11 +51,8 @@ class NewsItem(BaseModel):
     impact_score: int = Field(default=0, ge=0, le=100)
 
 
-
-
 class TipRanksContext(BaseModel):
     """Small external context payload supplied from the TipRanks connector."""
-
 
     symbol: str
     price: float = Field(gt=0)
@@ -74,8 +63,6 @@ class TipRanksContext(BaseModel):
     source: str = "TipRanks"
 
 
-
-
 class TradeHint(BaseModel):
     action: Action
     symbol: str
@@ -84,6 +71,9 @@ class TradeHint(BaseModel):
     news_risk: NewsRisk
     news_coverage: NewsCoverage = NewsCoverage.COMPLETE
     failed_news_sources: int = Field(default=0, ge=0)
+    risk_guard_status: str = "UNAVAILABLE"
+    day_drawdown_percent: float | None = Field(default=None, ge=0)
+    spread_to_atr: float = Field(default=0.0, ge=0)
     tipranks_status: str = "UNAVAILABLE"
     tipranks_adjustment: int = Field(default=0, ge=-6, le=6)
     mtf_status: str = "UNAVAILABLE"
