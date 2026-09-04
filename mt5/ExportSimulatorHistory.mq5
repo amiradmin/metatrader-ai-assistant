@@ -3,7 +3,10 @@
 #property description "One-click read-only exporter for simulator M1 + M15 history. No order functions."
 
 input string InputSymbol = "XAUUSD_o";
-input int M1Bars = 50000;
+// 300k M1 bars is enough for roughly 180+ completed gold trading days when the
+// broker makes that much history available. The exporter will warn if MT5 can
+// only supply a partial history window.
+input int M1Bars = 300000;
 input int M15Bars = 50000;
 
 string FormatBrokerTime(const datetime value)
@@ -69,9 +72,19 @@ bool ExportTimeframe(
    FileFlush(handle);
    FileClose(handle);
 
+   if(copied < requested_bars)
+   {
+      Print(
+         "ExportSimulatorHistory: WARNING partial history for ", EnumToString(timeframe),
+         " requested=", requested_bars, " copied=", copied,
+         ". MT5/broker has not supplied the full requested window yet."
+      );
+   }
+
    Print(
       "ExportSimulatorHistory: SUCCESS ", EnumToString(timeframe),
-      " bars=", copied, " file=MQL5/Files/", output_file,
+      " bars=", copied, " requested=", requested_bars,
+      " file=MQL5/Files/", output_file,
       " range=", FormatBrokerTime(rates[0].time),
       " -> ", FormatBrokerTime(rates[copied - 1].time)
    );
