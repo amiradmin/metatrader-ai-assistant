@@ -86,7 +86,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MetaTrader AI Assistant",
-    version="0.4.3",
+    version="0.4.4",
     lifespan=lifespan,
 )
 
@@ -212,4 +212,5 @@ async def hint() -> TradeHint:
         trade_hint,
         max_daily_loss_percent=settings.max_daily_loss_percent,
         max_spread_atr_ratio=settings.max_spread_atr_ratio,
+        min_entry_confidence=settings.strict_entry_min_confidence,
     )
