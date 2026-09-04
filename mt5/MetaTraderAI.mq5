@@ -20,7 +20,7 @@ input int RequestTimeoutMs = 45000;
 input int PanelLeft = 25;
 input int PanelTop = 120;
 input int PanelWidth = 600;
-input int PanelHeight = 335;
+input int PanelHeight = 370;
 input int PanelFontSize = 14;
 
 // -----------------------------------------------------------------------------
@@ -92,9 +92,6 @@ struct PositionAggregate
    double net_pnl;
 };
 
-// -----------------------------------------------------------------------------
-// Generic helpers
-// -----------------------------------------------------------------------------
 bool IsDemoAccount()
 {
    ENUM_ACCOUNT_TRADE_MODE mode =
@@ -192,9 +189,6 @@ bool WriteTextFile(const string file_name, const string payload)
    return true;
 }
 
-// -----------------------------------------------------------------------------
-// Bridge
-// -----------------------------------------------------------------------------
 bool CopyCompletedRates(
    const ENUM_TIMEFRAMES timeframe,
    const int requested_bars,
@@ -353,9 +347,6 @@ bool RefreshBridge()
    return snapshot_ok && context_ok;
 }
 
-// -----------------------------------------------------------------------------
-// Readable object panel
-// -----------------------------------------------------------------------------
 void SetPanelBackground()
 {
    string name = PanelPrefix + "BG";
@@ -367,7 +358,7 @@ void SetPanelBackground()
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, PanelTop);
    ObjectSetInteger(0, name, OBJPROP_XSIZE, PanelWidth);
    ObjectSetInteger(0, name, OBJPROP_YSIZE, PanelHeight);
-   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, C'20,24,31');
+   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, (long)ColorToARGB(C'20,24,31', 191));
    ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, C'85,95,110');
    ObjectSetInteger(0, name, OBJPROP_BACK, false);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
@@ -431,52 +422,50 @@ void DrawPanel(const string status, const string json)
    string auto_state = TradingArmed ? "ARMED DEMO" : "OFF";
 
    SetPanelBackground();
-   SetPanelLine("Title", "META TRADER AI  |  ONE EA", 18, PanelFontSize + 4, clrDeepSkyBlue);
-   SetPanelLine("Status", "Status: " + status + "   |   Auto: " + auto_state, 58, PanelFontSize, clrWhite);
-   SetPanelLine("Symbol", "Symbol: " + TradeSymbol + "   |   M15", 90, PanelFontSize, clrWhite);
-   SetPanelLine("Decision", "Decision: " + action, 124, PanelFontSize + 3, ActionColor(action));
+   SetPanelLine("Hello", "Hello Amir", 14, PanelFontSize + 1, clrWhite);
+   SetPanelLine("Title", "META TRADER AI  |  ONE EA", 46, PanelFontSize + 4, clrDeepSkyBlue);
+   SetPanelLine("Status", "Status: " + status + "   |   Auto: " + auto_state, 86, PanelFontSize, clrWhite);
+   SetPanelLine("Symbol", "Symbol: " + TradeSymbol + "   |   M15", 118, PanelFontSize, clrWhite);
+   SetPanelLine("Decision", "Decision: " + action, 152, PanelFontSize + 3, ActionColor(action));
    SetPanelLine(
       "Confidence",
       "Confidence: " + confidence + " / 100   |   Min: " + IntegerToString(MinConfidence),
-      162,
+      190,
       PanelFontSize,
       clrWhite
    );
    SetPanelLine(
       "Technical",
       "Technical: " + technical + "   |   H1: " + h1 + "   |   H4: " + h4 + "   |   MTF: " + mtf,
-      196,
+      224,
       PanelFontSize - 1,
       clrWhite
    );
    SetPanelLine(
       "News",
       "News: " + news + "   |   Coverage: " + coverage,
-      230,
+      258,
       PanelFontSize,
       news == "HIGH" ? clrTomato : clrWhite
    );
    SetPanelLine(
       "Risk",
       "Risk guard: " + guard + "   |   Daily DD: " + daily_dd + "%   |   Spread/ATR: " + spread_atr,
-      264,
+      292,
       PanelFontSize,
       GuardColor(guard)
    );
-   SetPanelLine("Time", "UTC: " + generated_at, 300, PanelFontSize - 2, clrSilver);
+   SetPanelLine("Time", "UTC: " + generated_at, 328, PanelFontSize - 2, clrSilver);
    ChartRedraw();
 }
 
 void DeletePanel()
 {
-   string ids[] = {"BG", "Title", "Status", "Symbol", "Decision", "Confidence", "Technical", "News", "Risk", "Time"};
+   string ids[] = {"BG", "Hello", "Title", "Status", "Symbol", "Decision", "Confidence", "Technical", "News", "Risk", "Time"};
    for(int i = 0; i < ArraySize(ids); i++)
       ObjectDelete(0, PanelPrefix + ids[i]);
 }
 
-// -----------------------------------------------------------------------------
-// API
-// -----------------------------------------------------------------------------
 bool FetchHint(string &response, int &status_code)
 {
    char request_data[];
@@ -500,9 +489,6 @@ bool FetchHint(string &response, int &status_code)
    return status_code == 200;
 }
 
-// -----------------------------------------------------------------------------
-// Demo execution helpers
-// -----------------------------------------------------------------------------
 int VolumeDigits(const double step)
 {
    if(step >= 1.0) return 0;
@@ -829,9 +815,6 @@ void MaybeTrade(const string json)
    }
 }
 
-// -----------------------------------------------------------------------------
-// Journal
-// -----------------------------------------------------------------------------
 int FindPosition(PositionAggregate &items[], const ulong position_id)
 {
    for(int i = 0; i < ArraySize(items); i++)
@@ -1010,9 +993,6 @@ bool BuildDemoJournal()
    return true;
 }
 
-// -----------------------------------------------------------------------------
-// Signal cycle
-// -----------------------------------------------------------------------------
 void RefreshSignal()
 {
    RefreshBridge();
@@ -1038,9 +1018,6 @@ void RefreshSignal()
    MaybeTrade(response);
 }
 
-// -----------------------------------------------------------------------------
-// Lifecycle
-// -----------------------------------------------------------------------------
 int OnInit()
 {
    if(_Symbol != TradeSymbol)
