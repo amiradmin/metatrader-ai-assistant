@@ -1,9 +1,13 @@
 """Shared domain models."""
 
+
 from datetime import datetime
 from enum import StrEnum
 
+
 from pydantic import BaseModel, Field
+
+
 
 
 class Action(StrEnum):
@@ -12,10 +16,21 @@ class Action(StrEnum):
     WAIT = "WAIT"
 
 
+
+
 class NewsRisk(StrEnum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
+    UNKNOWN = "UNKNOWN"
+
+
+class NewsCoverage(StrEnum):
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
 
 
 class MarketSnapshot(BaseModel):
@@ -33,6 +48,8 @@ class MarketSnapshot(BaseModel):
     closes: list[float] = Field(min_length=20)
 
 
+
+
 class NewsItem(BaseModel):
     source: str
     title: str
@@ -42,8 +59,11 @@ class NewsItem(BaseModel):
     impact_score: int = Field(default=0, ge=0, le=100)
 
 
+
+
 class TipRanksContext(BaseModel):
     """Small external context payload supplied from the TipRanks connector."""
+
 
     symbol: str
     price: float = Field(gt=0)
@@ -54,12 +74,16 @@ class TipRanksContext(BaseModel):
     source: str = "TipRanks"
 
 
+
+
 class TradeHint(BaseModel):
     action: Action
     symbol: str
     confidence: int = Field(ge=0, le=100)
     technical_score: int = Field(ge=-100, le=100)
     news_risk: NewsRisk
+    news_coverage: NewsCoverage = NewsCoverage.COMPLETE
+    failed_news_sources: int = Field(default=0, ge=0)
     tipranks_status: str = "UNAVAILABLE"
     tipranks_adjustment: int = Field(default=0, ge=-6, le=6)
     mtf_status: str = "UNAVAILABLE"
