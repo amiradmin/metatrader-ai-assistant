@@ -1,5 +1,5 @@
 #property strict
-#property description "ONE EA: bridge + readable panel + DEMO auto trader + demo journal"
+#property description "ONE EA: bridge + readable panel + DEMO auto trader + demo journal + demo goal"
 
 #include <Trade/Trade.mqh>
 
@@ -15,13 +15,15 @@ input int SignalSeconds = 15;
 input int RequestTimeoutMs = 45000;
 
 // -----------------------------------------------------------------------------
-// Readable panel
+// Readable panel + demo goal
 // -----------------------------------------------------------------------------
 input int PanelLeft = 25;
 input int PanelTop = 120;
-input int PanelWidth = 600;
-input int PanelHeight = 370;
+input int PanelWidth = 640;
+input int PanelHeight = 445;
 input int PanelFontSize = 14;
+input double DemoDailyGoalUSD = 10.0;
+input int DemoGoalWindowDays = 20;
 
 // -----------------------------------------------------------------------------
 // Demo execution
@@ -75,6 +77,12 @@ string PendingPullbackAction = "";
 bool TradingArmed = false;
 string LastApiPayload = "{}";
 string LastPanelStatus = "STARTING";
+
+double DemoTodayPnl = 0.0;
+double DemoGoalAverage = 0.0;
+double DemoGoalProgress = 0.0;
+int DemoGoalObservedDays = 0;
+string DemoGoalStatus = "COLLECTING 0/20";
 
 struct PositionAggregate
 {
@@ -242,14 +250,26 @@ string TimeframeJson(
    return json;
 }
 
+datetime DayStartOf(const datetime value)
+{
+   MqlDateTime parts;
+   TimeToStruct(value, parts);
+   parts.hour = 0;
+   parts.min = 0;
+   parts.sec = 0;
+   return StructToTime(parts);
+}
+
 datetime BrokerDayStart()
 {
-   MqlDateTime value;
-   TimeToStruct(TimeCurrent(), value);
-   value.hour = 0;
-   value.min = 0;
-   value.sec = 0;
-   return StructToTime(value);
+   return DayStartOf(TimeCurrent());
+}
+
+bool IsWeekday(const datetime value)
+{
+   MqlDateTime parts;
+   TimeToStruct(value, parts);
+   return parts.day_of_week >= 1 && parts.day_of_week <= 5;
 }
 
 bool AccountDayRiskMetrics(double &realized_pnl, double &day_start_balance)
@@ -277,6 +297,141 @@ bool AccountDayRiskMetrics(double &realized_pnl, double &day_start_balance)
 
    day_start_balance = AccountInfoDouble(ACCOUNT_BALANCE) - realized_pnl;
    return day_start_balance > 0.0;
+}
+
+bool IsManagedDeal(const ulong deal)
+{
+   if(deal == 0)
+      return false;
+   if((ulong)HistoryDealGetInteger(deal, DEAL_MAGIC) != MagicNumber)
+      return false;
+   if(HistoryDealGetString(deal, DEAL_SYMBOL) != TradeSymbol)
+      return false;
+
+   ENUM_DEAL_TYPE type =
+      (ENUM_DEAL_TYPE)HistoryDealGetInteger(deal, DEAL_TYPE);
+   return type == DEAL_TYPE_BUY || type == DEAL_TYPE_SELL;
+}
+
+double DealNetPnl(const ulong deal)
+{
+   return
+      HistoryDealGetDouble(deal, DEAL_PROFIT) +
+      HistoryDealGetDouble(deal, DEAL_COMMISSION) +
+      HistoryDealGetDouble(deal, DEAL_SWAP) +
+      HistoryDealGetDouble(deal, DEAL_FEE);
+}
+
+bool UpdateDemoGoalStats()
+{
+   DemoTodayPnl = 0.0;
+   DemoGoalAverage = 0.0;
+   DemoGoalProgress = 0.0;
+   DemoGoalObservedDays = 0;
+   DemoGoalStatus = "COLLECTING 0/" + IntegerToString(DemoGoalWindowDays);
+
+   if(!IsDemoAccount())
+   {
+      DemoGoalStatus = "DEMO ONLY";
+      return true;
+   }
+
+   datetime now = TimeCurrent();
+   datetime today_start = BrokerDayStart();
+   datetime history_start =
+      today_start - (datetime)(MathMax(JournalHistoryDays, 90) * 86400);
+
+   if(!HistorySelect(history_start, now))
+      return false;
+
+   int total = HistoryDealsTotal();
+   datetime earliest_managed = 0;
+
+   for(int i = 0; i < total; i++)
+   {
+      ulong deal = HistoryDealGetTicket(i);
+      if(!IsManagedDeal(deal))
+         continue;
+
+      datetime deal_time =
+         (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
+
+      if(deal_time >= today_start)
+         DemoTodayPnl += DealNetPnl(deal);
+
+      if(earliest_managed == 0 || deal_time < earliest_managed)
+         earliest_managed = deal_time;
+   }
+
+   if(earliest_managed == 0)
+      return true;
+
+   datetime first_day = DayStartOf(earliest_managed);
+   int available_completed_days = 0;
+
+   for(datetime day = first_day; day < today_start; day += 86400)
+   {
+      if(IsWeekday(day))
+         available_completed_days++;
+   }
+
+   int target_days = MathMin(available_completed_days, DemoGoalWindowDays);
+   if(target_days <= 0)
+      return true;
+
+   double window_pnl = 0.0;
+   int counted_days = 0;
+
+   for(
+      datetime day = today_start - 86400;
+      day >= first_day && counted_days < target_days;
+      day -= 86400
+   )
+   {
+      if(!IsWeekday(day))
+         continue;
+
+      datetime day_end = day + 86400;
+      double day_pnl = 0.0;
+
+      for(int i = 0; i < total; i++)
+      {
+         ulong deal = HistoryDealGetTicket(i);
+         if(!IsManagedDeal(deal))
+            continue;
+
+         datetime deal_time =
+            (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
+         if(deal_time >= day && deal_time < day_end)
+            day_pnl += DealNetPnl(deal);
+      }
+
+      window_pnl += day_pnl;
+      counted_days++;
+   }
+
+   DemoGoalObservedDays = counted_days;
+   DemoGoalAverage = window_pnl / counted_days;
+
+   if(DemoDailyGoalUSD > 0.0)
+      DemoGoalProgress = MathMax(0.0, DemoGoalAverage / DemoDailyGoalUSD * 100.0);
+
+   if(counted_days < DemoGoalWindowDays)
+   {
+      DemoGoalStatus =
+         "COLLECTING " + IntegerToString(counted_days) +
+         "/" + IntegerToString(DemoGoalWindowDays);
+   }
+   else if(DemoGoalAverage >= DemoDailyGoalUSD)
+   {
+      DemoGoalStatus = "GOAL MET";
+   }
+   else
+   {
+      DemoGoalStatus = "BUILDING";
+   }
+
+   return true;
 }
 
 bool WriteSnapshot()
@@ -405,6 +560,15 @@ color GuardColor(const string guard)
    return clrGold;
 }
 
+color GoalColor()
+{
+   if(DemoGoalStatus == "GOAL MET")
+      return clrLime;
+   if(DemoGoalAverage < 0.0 && DemoGoalObservedDays > 0)
+      return clrTomato;
+   return clrGold;
+}
+
 void DrawPanel(const string status, const string json)
 {
    string action = ValueOr(JsonValue(json, "action"), "WAIT");
@@ -455,13 +619,33 @@ void DrawPanel(const string status, const string json)
       PanelFontSize,
       GuardColor(guard)
    );
-   SetPanelLine("Time", "UTC: " + generated_at, 328, PanelFontSize - 2, clrSilver);
+   SetPanelLine(
+      "Goal",
+      "Demo goal: $" + DoubleToString(DemoDailyGoalUSD, 2) + "/day   |   Today: " +
+         (DemoTodayPnl >= 0.0 ? "+$" : "-$") + DoubleToString(MathAbs(DemoTodayPnl), 2),
+      328,
+      PanelFontSize,
+      GoalColor()
+   );
+   SetPanelLine(
+      "GoalState",
+      IntegerToString(DemoGoalWindowDays) + "D avg: " +
+         (DemoGoalAverage >= 0.0 ? "+$" : "-$") + DoubleToString(MathAbs(DemoGoalAverage), 2) +
+         "/day   |   Progress: " + DoubleToString(DemoGoalProgress, 0) + "%   |   " + DemoGoalStatus,
+      362,
+      PanelFontSize - 1,
+      GoalColor()
+   );
+   SetPanelLine("Time", "UTC: " + generated_at, 402, PanelFontSize - 2, clrSilver);
    ChartRedraw();
 }
 
 void DeletePanel()
 {
-   string ids[] = {"BG", "Hello", "Title", "Status", "Symbol", "Decision", "Confidence", "Technical", "News", "Risk", "Time"};
+   string ids[] = {
+      "BG", "Hello", "Title", "Status", "Symbol", "Decision",
+      "Confidence", "Technical", "News", "Risk", "Goal", "GoalState", "Time"
+   };
    for(int i = 0; i < ArraySize(ids); i++)
       ObjectDelete(0, PanelPrefix + ids[i]);
 }
@@ -1034,8 +1218,9 @@ int OnInit()
    if(
       SnapshotBars < 21 || ContextBars < 65 || BridgeSeconds < 1 ||
       SignalSeconds < 5 || JournalSeconds < 5 || RequestTimeoutMs < 1000 ||
-      PanelLeft < 0 || PanelTop < 0 || PanelWidth < 420 || PanelHeight < 250 ||
-      PanelFontSize < 9 || PanelFontSize > 24
+      PanelLeft < 0 || PanelTop < 0 || PanelWidth < 460 || PanelHeight < 400 ||
+      PanelFontSize < 9 || PanelFontSize > 24 ||
+      DemoDailyGoalUSD <= 0.0 || DemoGoalWindowDays < 5 || DemoGoalWindowDays > 60
    )
       return INIT_PARAMETERS_INCORRECT;
 
@@ -1072,6 +1257,8 @@ int OnInit()
    Trade.SetDeviationInPoints(SlippagePoints);
    Trade.SetTypeFillingBySymbol(TradeSymbol);
 
+   DemoGoalStatus = "COLLECTING 0/" + IntegerToString(DemoGoalWindowDays);
+
    Comment("");
    DeletePanel();
    EventSetTimer(1);
@@ -1079,6 +1266,7 @@ int OnInit()
    RefreshBridge();
    LastBridgeMs = GetTickCount64();
    BuildDemoJournal();
+   UpdateDemoGoalStats();
    LastJournalMs = GetTickCount64();
    DrawPanel("CONNECTING", "{}");
    RefreshSignal();
@@ -1107,6 +1295,7 @@ void OnTimer()
    if(ExportJournal && now_ms - LastJournalMs >= (ulong)JournalSeconds * 1000)
    {
       BuildDemoJournal();
+      UpdateDemoGoalStats();
       LastJournalMs = now_ms;
    }
 
