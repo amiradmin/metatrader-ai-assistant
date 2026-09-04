@@ -30,13 +30,14 @@ def snapshot(
 
 def directional_hint(
     *,
+    confidence: int = 82,
     mtf_status: str = "CONFIRM",
     tipranks_status: str = "UNAVAILABLE",
 ) -> TradeHint:
     return TradeHint(
         action=Action.BUY,
         symbol="EURUSD",
-        confidence=82,
+        confidence=confidence,
         technical_score=65,
         news_risk=NewsRisk.LOW,
         mtf_status=mtf_status,
@@ -61,17 +62,31 @@ def test_daily_guard_blocks_when_next_full_risk_would_breach_limit() -> None:
     assert result.day_drawdown_percent == pytest.approx(1.1)
 
 
-def test_trade_survives_only_when_risk_and_mtf_are_valid() -> None:
+def test_trade_survives_only_when_risk_mtf_and_confidence_are_valid() -> None:
     result = apply_pretrade_controls(
         snapshot(equity=995.0, day_start_balance=1000.0),
-        directional_hint(),
+        directional_hint(confidence=82),
         max_daily_loss_percent=1.5,
         max_spread_atr_ratio=0.25,
+        min_entry_confidence=75,
     )
 
     assert result.action is Action.BUY
     assert result.risk_guard_status == "OK"
     assert result.day_drawdown_percent == pytest.approx(0.5)
+
+
+def test_confidence_below_strict_threshold_fails_closed() -> None:
+    result = apply_pretrade_controls(
+        snapshot(equity=1000.0, day_start_balance=1000.0),
+        directional_hint(confidence=74),
+        max_daily_loss_percent=1.5,
+        max_spread_atr_ratio=0.25,
+        min_entry_confidence=75,
+    )
+
+    assert result.action is Action.WAIT
+    assert any("confidence 74 is below 75" in reason for reason in result.reasons)
 
 
 def test_abnormal_spread_to_atr_hard_blocks_directional_entry() -> None:
