@@ -24,8 +24,10 @@ class Settings(BaseSettings):
     forex_factory_calendar_url: str = (
         "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
     )
-    economic_calendar_cache_seconds: int = 300
+    economic_calendar_cache_seconds: int = 900
     economic_calendar_stale_fallback_minutes: int = 180
+    economic_calendar_disk_cache_path: Path = Path("data/economic_calendar_cache.json")
+    economic_calendar_disk_stale_minutes: int = 1440
     economic_calendar_request_timeout_seconds: float = 25.0
     economic_calendar_failure_cooldown_seconds: int = 300
     economic_calendar_max_attempts: int = 2
