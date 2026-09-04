@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     max_context_age_seconds: int = 90
     demo_trade_journal_path: Path = Path("data/demo_trade_journal.csv")
     market_structure_enabled: bool = True
+    strict_entry_min_confidence: int = 75
     max_risk_percent: float = 0.5
     max_daily_loss_percent: float = 1.5
     max_spread_atr_ratio: float = 0.25
