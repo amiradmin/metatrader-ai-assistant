@@ -16,8 +16,6 @@ class Settings(BaseSettings):
     mt5_context_path: Path = Path("data/mt5_context.json")
     max_context_age_seconds: int = 90
     demo_trade_journal_path: Path = Path("data/demo_trade_journal.csv")
-    demo_daily_goal_usd: float = 10.0
-    demo_goal_window_days: int = 20
     market_structure_enabled: bool = True
     max_risk_percent: float = 0.5
     max_daily_loss_percent: float = 1.5
