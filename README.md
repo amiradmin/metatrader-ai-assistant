@@ -141,6 +141,24 @@ For higher-timeframe structure, also compile and attach `mt5/ReadOnlyMarketConte
 
 The panel displays connection status, symbol, WAIT/BUY/SELL decision, confidence, technical score, H1/H4 market structure, MTF observer status, news risk, TipRanks context, UTC generation time, and read-only guidance. A directional bias is never an instruction or guarantee, and manual validation remains required.
 
+## Ubuntu desktop signal alerts
+
+`desktop-signal-notifier` polls the local `/hint` API and shows an Ubuntu desktop notification only when the already-guarded API response is `BUY` or `SELL` and `risk_guard_status` is `OK`. It never connects to a broker and never places an order. Alerts are deduplicated to one per symbol and completed M15 candle.
+
+Start the FastAPI service first, then run this in a second terminal:
+
+```bash
+uv run desktop-signal-notifier
+```
+
+It checks every 15 seconds by default. For a one-time connection check:
+
+```bash
+uv run desktop-signal-notifier --once
+```
+
+Ubuntu normally provides `notify-send` through `libnotify-bin`. If it is not installed, the notifier prints the exact package name instead of failing silently.
+
 ## Export M15 history for backtesting
 
 `mt5/HistoricalCsvExporter.mq5` is a one-shot, read-only script. It exports complete OHLCV history without placing or modifying orders.
