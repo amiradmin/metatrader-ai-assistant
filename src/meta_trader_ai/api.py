@@ -7,12 +7,9 @@ from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI, HTTPException
 
 from meta_trader_ai.bridge import SnapshotError, load_snapshot
+from meta_trader_ai.calendar_service import collect_calendar_news_resilient
 from meta_trader_ai.config import settings
-from meta_trader_ai.economic_calendar import (
-    EconomicCalendarError,
-    collect_calendar_news,
-    fail_closed_guard,
-)
+from meta_trader_ai.economic_calendar import EconomicCalendarError, fail_closed_guard
 from meta_trader_ai.market_structure import MarketStructureError, load_structure_context
 from meta_trader_ai.models import TipRanksContext, TradeHint
 from meta_trader_ai.news import collect_news
@@ -88,7 +85,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MetaTrader AI Assistant",
-    version="0.4.1",
+    version="0.4.2",
     lifespan=lifespan,
 )
 
@@ -163,17 +160,15 @@ async def hint() -> TradeHint:
         except TipRanksContextError:
             tipranks_context = None
 
-    # RSS headlines and the scheduled economic calendar are separate inputs but
-    # intentionally converge on the same NewsRisk gate. That means the MT5
-    # panel and DemoAutoTrader do not need a second order-path implementation:
-    # an active high-impact calendar window simply becomes NewsRisk.HIGH.
     news = await collect_news(settings.rss_urls, settings.news_lookback_hours)
 
     if settings.economic_calendar_enabled:
         try:
-            calendar_news = await collect_calendar_news(
+            calendar_news = await collect_calendar_news_resilient(
                 snapshot.symbol,
                 settings.forex_factory_calendar_url,
+                disk_cache_path=settings.economic_calendar_disk_cache_path,
+                disk_stale_minutes=settings.economic_calendar_disk_stale_minutes,
                 cache_seconds=settings.economic_calendar_cache_seconds,
                 stale_fallback_minutes=(
                     settings.economic_calendar_stale_fallback_minutes
