@@ -35,6 +35,50 @@ string UtcIsoTimestamp()
    );
 }
 
+datetime BrokerDayStart()
+{
+   MqlDateTime value;
+   TimeToStruct(TimeCurrent(), value);
+   value.hour = 0;
+   value.min = 0;
+   value.sec = 0;
+   return StructToTime(value);
+}
+
+bool AccountDayRiskMetrics(double &realized_pnl, double &day_start_balance)
+{
+   realized_pnl = 0.0;
+   day_start_balance = 0.0;
+
+   datetime now = TimeCurrent();
+   datetime day_start = BrokerDayStart();
+   if(!HistorySelect(day_start, now))
+   {
+      Print("ReadOnlySnapshotBridge: HistorySelect failed for daily risk metrics.");
+      return false;
+   }
+
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0)
+         continue;
+
+      ENUM_DEAL_TYPE type = (ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket, DEAL_TYPE);
+      if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL)
+         continue;
+
+      realized_pnl += HistoryDealGetDouble(ticket, DEAL_PROFIT);
+      realized_pnl += HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+      realized_pnl += HistoryDealGetDouble(ticket, DEAL_SWAP);
+      realized_pnl += HistoryDealGetDouble(ticket, DEAL_FEE);
+   }
+
+   day_start_balance = AccountInfoDouble(ACCOUNT_BALANCE) - realized_pnl;
+   return day_start_balance > 0.0;
+}
+
 string RatesField(MqlRates &rates[], int copied, string field, int digits)
 {
    string json = "\"" + field + "\":[";
@@ -117,6 +161,10 @@ bool WriteSnapshot(const MqlTick &tick, const int digits)
       return false;
    }
 
+   double day_realized_pnl = 0.0;
+   double day_start_balance = 0.0;
+   bool has_day_metrics = AccountDayRiskMetrics(day_realized_pnl, day_start_balance);
+
    string json = "{";
    json += "\"symbol\":\"" + EscapeJson(InputSymbol) + "\",";
    json += "\"timeframe\":\"" + EnumToString(InputTimeframe) + "\",";
@@ -126,6 +174,11 @@ bool WriteSnapshot(const MqlTick &tick, const int digits)
    json += "\"balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + ",";
    json += "\"equity\":" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + ",";
    json += "\"positions_total\":" + IntegerToString(PositionsTotal()) + ",";
+   if(has_day_metrics)
+   {
+      json += "\"day_start_balance\":" + DoubleToString(day_start_balance, 2) + ",";
+      json += "\"day_realized_pnl\":" + DoubleToString(day_realized_pnl, 2) + ",";
+   }
    json += RatesField(rates, copied, "opens", digits) + ",";
    json += RatesField(rates, copied, "highs", digits) + ",";
    json += RatesField(rates, copied, "lows", digits) + ",";
