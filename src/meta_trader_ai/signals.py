@@ -1,11 +1,14 @@
 """Explainable M15-first signal engine; never places orders."""
 
+
 from datetime import datetime, timezone
+
 
 from meta_trader_ai.market_structure import MultiTimeframeStructure
 from meta_trader_ai.models import (
     Action,
     MarketSnapshot,
+    NewsCoverage,
     NewsItem,
     NewsRisk,
     TipRanksContext,
@@ -14,12 +17,18 @@ from meta_trader_ai.models import (
 from meta_trader_ai.news import risk_for_symbol
 
 
+
+
 MIN_ACTION_CONFIDENCE = 70
 M15_TIMEFRAMES = {"M15", "PERIOD_M15"}
 
 
+
+
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
 
 
 def _ema(values: list[float], period: int) -> float:
@@ -29,6 +38,8 @@ def _ema(values: list[float], period: int) -> float:
     for value in values[1:]:
         result = alpha * value + (1.0 - alpha) * result
     return result
+
+
 
 
 def _rsi(values: list[float], period: int = 14) -> float:
@@ -43,6 +54,8 @@ def _rsi(values: list[float], period: int = 14) -> float:
         return 100.0
     relative_strength = gains / losses
     return 100.0 - (100.0 / (1.0 + relative_strength))
+
+
 
 
 def _atr(snapshot: MarketSnapshot, period: int = 14) -> float:
@@ -73,8 +86,11 @@ def _atr(snapshot: MarketSnapshot, period: int = 14) -> float:
             for previous, current in zip(closes, closes[1:])
         ][-period:]
 
+
     atr = sum(sample) / len(sample) if sample else 0.0
     return max(atr, 1e-12)
+
+
 
 
 def _m15_score(snapshot: MarketSnapshot) -> tuple[int, float, float, float, list[str]]:
@@ -85,11 +101,13 @@ def _m15_score(snapshot: MarketSnapshot) -> tuple[int, float, float, float, list
     rsi14 = _rsi(closes, 14)
     atr14 = _atr(snapshot, 14)
 
+
     ema_gap_atr = (ema9 - ema21) / atr14
     trend_component = _clamp(ema_gap_atr * 18.0, -45.0, 45.0)
     rsi_component = _clamp((rsi14 - 50.0) * 0.4, -20.0, 20.0)
     momentum_4 = (closes[-1] - closes[-5]) / atr14
     momentum_component = _clamp(momentum_4 * 4.0, -15.0, 15.0)
+
 
     score = int(
         round(
@@ -113,12 +131,15 @@ def _m15_score(snapshot: MarketSnapshot) -> tuple[int, float, float, float, list
     return score, rsi14, atr14, ema9 - ema21, reasons
 
 
+
+
 def _direction_and_confidence(
     technical_score: int,
     rsi14: float,
     ema_gap: float,
     spread_to_atr: float,
     news_risk: NewsRisk,
+    news_coverage: NewsCoverage,
 ) -> tuple[Action, int, list[str]]:
     """Turn the technical score into a dynamic, explainable confidence value."""
     reasons: list[str] = []
@@ -129,7 +150,9 @@ def _direction_and_confidence(
     else:
         action = Action.WAIT
 
+
     confidence = 48.0 + min(34.0, abs(technical_score) * 0.4)
+
 
     aligned = (
         action is Action.BUY and ema_gap > 0.0 and rsi14 >= 52.0
@@ -140,6 +163,7 @@ def _direction_and_confidence(
         confidence += 6.0
         reasons.append("EMA direction and RSI confirm the same M15 bias.")
 
+
     if spread_to_atr <= 0.10:
         confidence += 2.0
     elif spread_to_atr > 0.25:
@@ -149,11 +173,26 @@ def _direction_and_confidence(
         confidence -= 8.0
         reasons.append("Spread is elevated relative to M15 ATR.")
 
+
     if news_risk is NewsRisk.MEDIUM:
         confidence -= 12.0
         reasons.append("Medium-impact news reduced confidence.")
+    elif news_risk is NewsRisk.UNKNOWN:
+        confidence -= 18.0
+        reasons.append(
+            "All news sources are unavailable; UNKNOWN risk reduced confidence."
+        )
+
+    if news_coverage is NewsCoverage.PARTIAL:
+        confidence -= 2.0
+        reasons.append(
+            "Some news sources are unavailable; a small confidence penalty was applied."
+        )
+
 
     return action, int(round(_clamp(confidence, 0.0, 100.0))), reasons
+
+
 
 
 def _tipranks_adjustment(
@@ -166,8 +205,10 @@ def _tipranks_adjustment(
             "TipRanks context unavailable or stale; no confidence adjustment."
         ]
 
+
     bias = 0
     components: list[str] = []
+
 
     if context.change_percentage is not None:
         if context.change_percentage >= 0.10:
@@ -176,21 +217,25 @@ def _tipranks_adjustment(
             bias -= 2
         components.append(f"day change={context.change_percentage:+.2f}%")
 
+
     if context.price_avg_50 is not None:
         above_50 = context.price >= context.price_avg_50
         bias += 2 if above_50 else -2
         components.append("above 50D avg" if above_50 else "below 50D avg")
+
 
     if context.price_avg_200 is not None:
         above_200 = context.price >= context.price_avg_200
         bias += 2 if above_200 else -2
         components.append("above 200D avg" if above_200 else "below 200D avg")
 
+
     detail = ", ".join(components) if components else "no directional fields"
     if action is Action.WAIT or bias == 0:
         return 0, "NEUTRAL", [
             f"TipRanks context neutral for M15 decision ({detail})."
         ]
+
 
     aligned = (action is Action.BUY and bias > 0) or (
         action is Action.SELL and bias < 0
@@ -205,12 +250,16 @@ def _tipranks_adjustment(
     ]
 
 
+
+
 def _m15_reference_action(technical_score: int) -> Action:
     if technical_score >= 30:
         return Action.BUY
     if technical_score <= -30:
         return Action.SELL
     return Action.WAIT
+
+
 
 
 def _mtf_structure_status(
@@ -223,6 +272,7 @@ def _mtf_structure_status(
             "H1/H4 market structure unavailable or stale; observer skipped."
         ]
 
+
     h1 = context.h1
     h4 = context.h4
     detail = (
@@ -234,6 +284,7 @@ def _mtf_structure_status(
             f"MTF market structure observer: {detail}; M15 has no directional bias."
         ]
 
+
     desired = "BULLISH" if action is Action.BUY else "BEARISH"
     opposite = "BEARISH" if action is Action.BUY else "BULLISH"
     trends = (h1.trend, h4.trend)
@@ -244,10 +295,13 @@ def _mtf_structure_status(
     else:
         status = "MIXED"
 
+
     return status, [
         f"MTF market structure {status.lower()}s M15 bias: {detail}. "
         "Observer only; no confidence points are applied until validation."
     ]
+
+
 
 
 def build_hint(
@@ -256,18 +310,26 @@ def build_hint(
     max_risk_percent: float,
     tipranks_context: TipRanksContext | None = None,
     market_structure_context: MultiTimeframeStructure | None = None,
+    news_coverage: NewsCoverage = NewsCoverage.COMPLETE,
+    failed_news_sources: int = 0,
 ) -> TradeHint:
     """Build an M15-first hint with news and observational H1/H4 structure."""
     technical_score, rsi14, atr14, ema_gap, reasons = _m15_score(snapshot)
     spread = max(0.0, snapshot.ask - snapshot.bid)
     spread_to_atr = spread / atr14
-    news_risk = risk_for_symbol(snapshot.symbol, news)
+    news_risk = (
+        NewsRisk.UNKNOWN
+        if news_coverage is NewsCoverage.UNAVAILABLE
+        else risk_for_symbol(snapshot.symbol, news)
+    )
     reasons.extend(
         [
             f"Current spread={spread:.5f} ({spread_to_atr:.2f} ATR)",
             f"News risk={news_risk.value}",
+            f"News coverage={news_coverage.value}; failed sources={failed_news_sources}",
         ]
     )
+
 
     tipranks_status = "BYPASSED"
     tipranks_adjustment = 0
@@ -290,8 +352,10 @@ def build_hint(
             ema_gap,
             spread_to_atr,
             news_risk,
+            news_coverage,
         )
         reasons.extend(confidence_reasons)
+
 
         tipranks_adjustment, tipranks_status, tipranks_reasons = _tipranks_adjustment(
             action,
@@ -301,6 +365,7 @@ def build_hint(
             round(_clamp(confidence + tipranks_adjustment, 0.0, 100.0))
         )
         reasons.extend(tipranks_reasons)
+
 
         if action in {Action.BUY, Action.SELL} and confidence < MIN_ACTION_CONFIDENCE:
             reasons.append(
@@ -313,11 +378,13 @@ def build_hint(
                 "M15 technical score is inside the neutral zone (-30 to +30)."
             )
 
+
     mtf_status, mtf_reasons = _mtf_structure_status(
         _m15_reference_action(technical_score),
         market_structure_context,
     )
     reasons.extend(mtf_reasons)
+
 
     currencies = {snapshot.symbol[:3].upper(), snapshot.symbol[3:6].upper()}
     relevant = sorted(
@@ -325,6 +392,7 @@ def build_hint(
         key=lambda item: item.impact_score,
         reverse=True,
     )[:5]
+
 
     h1 = market_structure_context.h1 if market_structure_context else None
     h4 = market_structure_context.h4 if market_structure_context else None
@@ -334,6 +402,8 @@ def build_hint(
         confidence=confidence,
         technical_score=technical_score,
         news_risk=news_risk,
+        news_coverage=news_coverage,
+        failed_news_sources=failed_news_sources,
         tipranks_status=tipranks_status,
         tipranks_adjustment=tipranks_adjustment,
         mtf_status=mtf_status,
