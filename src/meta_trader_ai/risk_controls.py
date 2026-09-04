@@ -62,17 +62,26 @@ def _block_directional(hint: TradeHint, reason: str) -> None:
         hint.reasons.append(reason)
 
 
-def _apply_strict_setup_gate(hint: TradeHint) -> None:
+def _apply_strict_setup_gate(hint: TradeHint, *, min_entry_confidence: int) -> None:
     """Require all mandatory non-optional entry gates before BUY/SELL survives.
 
-    The gate deliberately fails closed.  A directional M15 setup is only
-    executable when the account risk guard is healthy and H1/H4 structure both
-    confirm the same direction.  TipRanks remains optional context, but an
-    explicit OPPOSE result is a veto.  News-source outages still follow the
-    existing degraded-mode policy: UNKNOWN/PARTIAL reduce confidence rather
-    than becoming an automatic hard stop.
+    The gate deliberately fails closed. A directional M15 setup is only
+    executable when confidence reaches the strict execution threshold, the
+    account risk guard is healthy, and H1/H4 structure both confirm the same
+    direction. TipRanks remains optional context, but an explicit OPPOSE result
+    is a veto. News-source outages still follow the existing degraded-mode
+    policy: UNKNOWN/PARTIAL reduce confidence rather than becoming an automatic
+    hard stop.
     """
     if hint.action not in DIRECTIONAL_ACTIONS:
+        return
+
+    if hint.confidence < min_entry_confidence:
+        _block_directional(
+            hint,
+            f"Strict entry gate blocked direction because confidence "
+            f"{hint.confidence} is below {min_entry_confidence}.",
+        )
         return
 
     if hint.risk_guard_status != "OK":
@@ -105,14 +114,16 @@ def apply_pretrade_controls(
     *,
     max_daily_loss_percent: float,
     max_spread_atr_ratio: float,
+    min_entry_confidence: int = 75,
 ) -> TradeHint:
     """Apply account, spread and strict setup gates before execution.
 
     The daily guard is conservative: a new directional trade is blocked when
     the current day drawdown plus the configured maximum per-trade risk could
-    breach the daily loss ceiling.  After those controls, the strict setup gate
-    requires a healthy risk guard and full H1/H4 confirmation.  Therefore BUY
-    or SELL is never returned merely because the raw M15 score is directional.
+    breach the daily loss ceiling. After those controls, the strict setup gate
+    requires the configured execution confidence, a healthy risk guard and full
+    H1/H4 confirmation. Therefore BUY or SELL is never returned merely because
+    the raw M15 score is directional.
     """
     spread = max(0.0, snapshot.ask - snapshot.bid)
     spread_to_atr = spread / _atr(snapshot)
@@ -182,5 +193,5 @@ def apply_pretrade_controls(
             f"> {max_spread_atr_ratio:.2f} ATR.",
         )
 
-    _apply_strict_setup_gate(hint)
+    _apply_strict_setup_gate(hint, min_entry_confidence=min_entry_confidence)
     return hint
