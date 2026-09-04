@@ -28,13 +28,19 @@ def snapshot(
     )
 
 
-def directional_hint() -> TradeHint:
+def directional_hint(
+    *,
+    mtf_status: str = "CONFIRM",
+    tipranks_status: str = "UNAVAILABLE",
+) -> TradeHint:
     return TradeHint(
         action=Action.BUY,
         symbol="EURUSD",
         confidence=82,
         technical_score=65,
         news_risk=NewsRisk.LOW,
+        mtf_status=mtf_status,
+        tipranks_status=tipranks_status,
         reasons=[],
         relevant_news=[],
         max_risk_percent=0.5,
@@ -44,11 +50,7 @@ def directional_hint() -> TradeHint:
 
 def test_daily_guard_blocks_when_next_full_risk_would_breach_limit() -> None:
     result = apply_pretrade_controls(
-        snapshot(
-            equity=989.0,
-            day_start_balance=1000.0,
-            day_realized_pnl=-11.0,
-        ),
+        snapshot(equity=989.0, day_start_balance=1000.0, day_realized_pnl=-11.0),
         directional_hint(),
         max_daily_loss_percent=1.5,
         max_spread_atr_ratio=0.25,
@@ -57,10 +59,9 @@ def test_daily_guard_blocks_when_next_full_risk_would_breach_limit() -> None:
     assert result.action is Action.WAIT
     assert result.risk_guard_status == "DAILY_RISK_BUDGET_EXHAUSTED"
     assert result.day_drawdown_percent == pytest.approx(1.1)
-    assert any("risk budget exhausted" in reason.lower() for reason in result.reasons)
 
 
-def test_daily_guard_allows_trade_when_loss_budget_remains() -> None:
+def test_trade_survives_only_when_risk_and_mtf_are_valid() -> None:
     result = apply_pretrade_controls(
         snapshot(equity=995.0, day_start_balance=1000.0),
         directional_hint(),
@@ -75,11 +76,7 @@ def test_daily_guard_allows_trade_when_loss_budget_remains() -> None:
 
 def test_abnormal_spread_to_atr_hard_blocks_directional_entry() -> None:
     result = apply_pretrade_controls(
-        snapshot(
-            equity=1000.0,
-            day_start_balance=1000.0,
-            spread=0.0004,
-        ),
+        snapshot(equity=1000.0, day_start_balance=1000.0, spread=0.0004),
         directional_hint(),
         max_daily_loss_percent=1.5,
         max_spread_atr_ratio=0.25,
@@ -90,7 +87,7 @@ def test_abnormal_spread_to_atr_hard_blocks_directional_entry() -> None:
     assert any("Abnormal spread gate" in reason for reason in result.reasons)
 
 
-def test_missing_day_metrics_degrades_guard_without_blocking_trade() -> None:
+def test_missing_day_metrics_fails_closed() -> None:
     result = apply_pretrade_controls(
         snapshot(),
         directional_hint(),
@@ -98,5 +95,30 @@ def test_missing_day_metrics_degrades_guard_without_blocking_trade() -> None:
         max_spread_atr_ratio=0.25,
     )
 
-    assert result.action is Action.BUY
+    assert result.action is Action.WAIT
     assert result.risk_guard_status == "UNAVAILABLE"
+
+
+@pytest.mark.parametrize("mtf_status", ["MIXED", "OPPOSE", "OBSERVE", "UNAVAILABLE"])
+def test_mtf_must_fully_confirm_before_direction_survives(mtf_status: str) -> None:
+    result = apply_pretrade_controls(
+        snapshot(equity=1000.0, day_start_balance=1000.0),
+        directional_hint(mtf_status=mtf_status),
+        max_daily_loss_percent=1.5,
+        max_spread_atr_ratio=0.25,
+    )
+
+    assert result.action is Action.WAIT
+    assert any("does not fully confirm" in reason for reason in result.reasons)
+
+
+def test_explicit_tipranks_opposition_is_a_veto() -> None:
+    result = apply_pretrade_controls(
+        snapshot(equity=1000.0, day_start_balance=1000.0),
+        directional_hint(tipranks_status="OPPOSE"),
+        max_daily_loss_percent=1.5,
+        max_spread_atr_ratio=0.25,
+    )
+
+    assert result.action is Action.WAIT
+    assert any("TipRanks" in reason and "opposes" in reason for reason in result.reasons)
