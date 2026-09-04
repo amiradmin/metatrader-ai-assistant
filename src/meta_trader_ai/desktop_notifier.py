@@ -40,11 +40,20 @@ def fetch_json(url: str, timeout: float = 30.0) -> dict[str, object]:
     return payload
 
 
-def is_notifiable(payload: Mapping[str, object]) -> bool:
-    """Return whether the API has approved a directional hint for review."""
+def is_notifiable(
+    payload: Mapping[str, object],
+    *,
+    minimum_confidence: int = 75,
+) -> bool:
+    """Return whether the API has approved a strict directional hint for review."""
+    try:
+        confidence = int(payload.get("confidence", 0))
+    except (TypeError, ValueError):
+        return False
     return (
         str(payload.get("action", "")) in {Action.BUY.value, Action.SELL.value}
         and str(payload.get("risk_guard_status", "")) == "OK"
+        and confidence >= minimum_confidence
     )
 
 
@@ -94,6 +103,7 @@ def run(
     interval: float,
     timeout: float,
     once: bool,
+    minimum_confidence: int = 75,
     sender: Callable[[DesktopNotification], None] = send_notification,
 ) -> None:
     """Poll the local API and alert once per symbol and completed M15 candle."""
@@ -101,7 +111,7 @@ def run(
     while True:
         try:
             payload = fetch_json(url, timeout=max(timeout, 1.0))
-            if is_notifiable(payload):
+            if is_notifiable(payload, minimum_confidence=minimum_confidence):
                 notification = notification_from_payload(payload)
                 if notification.key not in alerted:
                     sender(notification)
@@ -128,9 +138,16 @@ def main() -> None:
     parser.add_argument("--url", default="http://127.0.0.1:8000/hint")
     parser.add_argument("--interval", type=float, default=15.0)
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--min-confidence", type=int, default=75)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    run(url=args.url, interval=args.interval, timeout=args.timeout, once=args.once)
+    run(
+        url=args.url,
+        interval=args.interval,
+        timeout=args.timeout,
+        once=args.once,
+        minimum_confidence=args.min_confidence,
+    )
 
 
 if __name__ == "__main__":
