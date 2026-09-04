@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 
 from meta_trader_ai.backtest import load_candles
+from meta_trader_ai.candidate_trace import build_candidate_trace, write_candidate_trace
 from meta_trader_ai.ea_m1_simulator import (
     _selected_indices,
     render_m1_report,
@@ -35,7 +36,7 @@ def _find_history_files() -> tuple[Path, Path, Path]:
     m1 = _newest(list(root.glob("**/MQL5/Files/xauusd_m1_history.csv")))
     if m1 is None:
         raise SystemExit(
-            "M1 history not found. Run MT5 Scripts -> ExportM1History first."
+            "M1 history not found. Run MT5 Scripts -> ExportSimulatorHistory first."
         )
 
     files_dir = m1.parent
@@ -46,7 +47,7 @@ def _find_history_files() -> tuple[Path, Path, Path]:
         m15 = _newest(list(root.glob("**/MQL5/Files/xauusd_m15_history.csv")))
     if m15 is None:
         raise SystemExit(
-            "M15 history not found. Run MT5 Scripts -> HistoricalCsvExporter first."
+            "M15 history not found. Run MT5 Scripts -> ExportSimulatorHistory first."
         )
     return m15, m1, files_dir
 
@@ -98,7 +99,7 @@ def main() -> None:
         point_size=0.01,
         lookback_bars=100,
     )
-    params = EAParameters()
+    params = EAParameters(min_confidence=args.confidence)
     result = simulate_m15_signals_on_m1(
         m15,
         m1,
@@ -111,12 +112,25 @@ def main() -> None:
         m1_end_index=end,
     )
 
+    traces = build_candidate_trace(
+        m15,
+        m1,
+        decisions,
+        result,
+        params=params,
+        point_size=0.01,
+        start_index=start,
+        end_index=end,
+    )
+
     prefix = files_dir / "ea_simulator"
     trade_path = prefix.with_name(prefix.name + "_trades.csv")
+    candidate_path = prefix.with_name(prefix.name + "_candidates.csv")
     daily_path = prefix.with_name(prefix.name + "_daily.csv")
     report_path = prefix.with_name(prefix.name + "_report.txt")
 
     write_trade_journal(trade_path, result.trades)
+    write_candidate_trace(candidate_path, traces)
     write_daily_report(daily_path, result)
     report = render_m1_report(
         result,
@@ -128,14 +142,24 @@ def main() -> None:
     report_path.write_text(report, encoding="utf-8")
     _copy_visualizer(files_dir)
 
+    opened = sum(item.status == "OPENED" for item in traces)
+    rejected = sum(item.status == "REJECTED" for item in traces)
+    waiting = sum(item.status == "WAIT_PULLBACK" for item in traces)
+
     print(report, end="")
+    print("\nCANDIDATE TRACE")
+    print(
+        f"Directional candidates: {len(traces)} | Opened: {opened} | "
+        f"Rejected: {rejected} | Waiting pullback: {waiting}"
+    )
     print("\nREADY FOR MT5")
     print(f"Date: {target_date.isoformat()} (broker date)")
     print(f"M15: {m15_path}")
     print(f"M1:  {m1_path}")
-    print(f"Trades file: {trade_path}")
+    print(f"Trades file:     {trade_path}")
+    print(f"Candidates file: {candidate_path}")
     print("MT5 -> XAUUSD_o M15 -> Scripts -> SimulatorTradeVisualizer -> OK")
-    print("SimulatorFile can stay at its default: ea_simulator_trades.csv")
+    print("Visualizer file names can stay at their defaults.")
 
 
 if __name__ == "__main__":
