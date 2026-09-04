@@ -25,3 +25,4 @@ packages = ["src/meta_trader_ai"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+addopts = "-p no:launch_testing -p no:launch_testing_ros"
