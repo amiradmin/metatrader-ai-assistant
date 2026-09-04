@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from meta_trader_ai.models import Action, MarketSnapshot, NewsRisk, TradeHint
 from meta_trader_ai.risk_controls import apply_pretrade_controls
 
@@ -54,7 +56,7 @@ def test_daily_guard_blocks_when_next_full_risk_would_breach_limit() -> None:
 
     assert result.action is Action.WAIT
     assert result.risk_guard_status == "DAILY_RISK_BUDGET_EXHAUSTED"
-    assert result.day_drawdown_percent == 1.1
+    assert result.day_drawdown_percent == pytest.approx(1.1)
     assert any("risk budget exhausted" in reason.lower() for reason in result.reasons)
 
 
@@ -68,7 +70,7 @@ def test_daily_guard_allows_trade_when_loss_budget_remains() -> None:
 
     assert result.action is Action.BUY
     assert result.risk_guard_status == "OK"
-    assert result.day_drawdown_percent == 0.5
+    assert result.day_drawdown_percent == pytest.approx(0.5)
 
 
 def test_abnormal_spread_to_atr_hard_blocks_directional_entry() -> None:
