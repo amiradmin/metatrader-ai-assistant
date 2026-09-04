@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     max_spread_atr_ratio: float = 0.25
     news_lookback_hours: int = 24
     high_impact_block_minutes: int = 30
+    signal_external_data_timeout_seconds: float = 4.0
 
     economic_calendar_enabled: bool = True
     forex_factory_calendar_url: str = (
