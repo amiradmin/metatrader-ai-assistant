@@ -28,7 +28,7 @@ enum ENUM_MT_AI_RISK_MODE
 // - 0.50% planned risk per ticket (about 2.5% for a full basket)
 // - if the strict API action is WAIT, direction is derived from technical_score
 // - MTF / anti-chase / pullback / rejection confirmation are bypassed in HIGH
-// - demo-only, risk guard, high-impact-news and spread gates remain hard stops
+// - demo-only, local daily-risk, high-impact-news and spread gates remain hard stops
 input ENUM_MT_AI_RISK_MODE RiskMode = MT_AI_LOW;
 input bool RequireEntryConfirmation = true;
 
@@ -282,8 +282,18 @@ void MaybeProfileTrade(const string json)
    if(action != "BUY" && action != "SELL") return;
    if(confidence < RiskModeMinConfidence()) return;
    if(news_risk == "HIGH") return;
-   if(risk_guard != "OK") return;
+   if(!high_demo && risk_guard != "OK") return;
    if(!high_demo && mtf_status != "CONFIRM") return;
+
+   if(high_demo && risk_guard != "OK" && Verbose)
+   {
+      Print(
+         "MetaTraderAI HIGH DEMO: API risk_guard=", risk_guard,
+         " overridden by local ",
+         DoubleToString(RiskModeDailyLossLimitPercent(), 2),
+         "% daily-risk profile gate."
+      );
+   }
 
    long spread = SymbolInfoInteger(TradeSymbol, SYMBOL_SPREAD);
    if(RiskModeMaxSpreadPoints() > 0 && spread > RiskModeMaxSpreadPoints())
