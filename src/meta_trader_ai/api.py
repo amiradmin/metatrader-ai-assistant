@@ -11,8 +11,8 @@ from meta_trader_ai.calendar_service import collect_calendar_news_resilient
 from meta_trader_ai.config import settings
 from meta_trader_ai.economic_calendar import EconomicCalendarError
 from meta_trader_ai.market_structure import MarketStructureError, load_structure_context
-from meta_trader_ai.models import NewsCoverage, TipRanksContext, TradeHint
-from meta_trader_ai.news import collect_news_report
+from meta_trader_ai.models import NewsCoverage, NewsItem, TipRanksContext, TradeHint
+from meta_trader_ai.news import NewsCollection, collect_news_report
 from meta_trader_ai.risk_controls import apply_pretrade_controls
 from meta_trader_ai.signals import build_hint
 from meta_trader_ai.tipranks import TipRanksContextError, load_context, save_context
@@ -63,6 +63,95 @@ async def _tipranks_refresh_loop() -> None:
         await asyncio.sleep(interval_seconds)
 
 
+async def _collect_signal_news(symbol: str) -> tuple[list[NewsItem], NewsCoverage, int]:
+    """Collect external news under a hard latency budget.
+
+    MT5/Wine can surface a non-standard HTTP 1003 when WebRequest waits too long.
+    Signal generation must therefore never wait for slow RSS/calendar providers.
+    Timed-out sources are reported as unavailable and the signal engine applies
+    its normal confidence penalty instead of losing the whole /hint response.
+    """
+    rss_task: asyncio.Task[NewsCollection] = asyncio.create_task(
+        collect_news_report(settings.rss_urls, settings.news_lookback_hours)
+    )
+    calendar_task: asyncio.Task[list[NewsItem]] | None = None
+    if settings.economic_calendar_enabled:
+        calendar_task = asyncio.create_task(
+            collect_calendar_news_resilient(
+                symbol,
+                settings.forex_factory_calendar_url,
+                disk_cache_path=settings.economic_calendar_disk_cache_path,
+                disk_stale_minutes=settings.economic_calendar_disk_stale_minutes,
+                cache_seconds=settings.economic_calendar_cache_seconds,
+                stale_fallback_minutes=settings.economic_calendar_stale_fallback_minutes,
+                request_timeout_seconds=settings.economic_calendar_request_timeout_seconds,
+                failure_cooldown_seconds=settings.economic_calendar_failure_cooldown_seconds,
+                max_attempts=settings.economic_calendar_max_attempts,
+                high_before_minutes=settings.economic_calendar_high_before_minutes,
+                high_after_minutes=settings.economic_calendar_high_after_minutes,
+                medium_before_minutes=settings.economic_calendar_medium_before_minutes,
+                medium_after_minutes=settings.economic_calendar_medium_after_minutes,
+            )
+        )
+
+    tasks: set[asyncio.Task[object]] = {rss_task}
+    if calendar_task is not None:
+        tasks.add(calendar_task)
+
+    timeout_seconds = max(0.5, settings.signal_external_data_timeout_seconds)
+    _, pending = await asyncio.wait(tasks, timeout=timeout_seconds)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+        logger.warning(
+            "Signal external-data deadline reached after %.2fs; using degraded news coverage.",
+            timeout_seconds,
+        )
+
+    news: list[NewsItem] = []
+    successful_sources = 0
+    failed_sources = 0
+
+    if rss_task.cancelled() or not rss_task.done():
+        failed_sources += len(settings.rss_urls)
+    else:
+        try:
+            rss_news = rss_task.result()
+        except Exception as exc:
+            failed_sources += len(settings.rss_urls)
+            logger.warning("RSS news collection failed: %s", exc)
+        else:
+            news.extend(rss_news.items)
+            successful_sources += rss_news.total_sources - rss_news.failed_sources
+            failed_sources += rss_news.failed_sources
+
+    if calendar_task is not None:
+        if calendar_task.cancelled() or not calendar_task.done():
+            failed_sources += 1
+        else:
+            try:
+                calendar_news = calendar_task.result()
+            except EconomicCalendarError as exc:
+                failed_sources += 1
+                logger.warning("Economic calendar check failed: %s", exc)
+            except Exception as exc:
+                failed_sources += 1
+                logger.warning("Economic calendar task failed: %s", exc)
+            else:
+                news.extend(calendar_news)
+                successful_sources += 1
+
+    if successful_sources == 0:
+        coverage = NewsCoverage.UNAVAILABLE
+    elif failed_sources:
+        coverage = NewsCoverage.PARTIAL
+    else:
+        coverage = NewsCoverage.COMPLETE
+
+    return news, coverage, failed_sources
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage the optional TipRanks background refresh task."""
@@ -86,7 +175,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MetaTrader AI Assistant",
-    version="0.4.4",
+    version="0.4.5",
     lifespan=lifespan,
 )
 
@@ -158,45 +247,7 @@ async def hint() -> TradeHint:
         except TipRanksContextError:
             tipranks_context = None
 
-    rss_news = await collect_news_report(
-        settings.rss_urls,
-        settings.news_lookback_hours,
-    )
-    news = list(rss_news.items)
-    total_news_sources = rss_news.total_sources
-    failed_news_sources = rss_news.failed_sources
-    successful_news_sources = total_news_sources - failed_news_sources
-
-    if settings.economic_calendar_enabled:
-        total_news_sources += 1
-        try:
-            calendar_news = await collect_calendar_news_resilient(
-                snapshot.symbol,
-                settings.forex_factory_calendar_url,
-                disk_cache_path=settings.economic_calendar_disk_cache_path,
-                disk_stale_minutes=settings.economic_calendar_disk_stale_minutes,
-                cache_seconds=settings.economic_calendar_cache_seconds,
-                stale_fallback_minutes=settings.economic_calendar_stale_fallback_minutes,
-                request_timeout_seconds=settings.economic_calendar_request_timeout_seconds,
-                failure_cooldown_seconds=settings.economic_calendar_failure_cooldown_seconds,
-                max_attempts=settings.economic_calendar_max_attempts,
-                high_before_minutes=settings.economic_calendar_high_before_minutes,
-                high_after_minutes=settings.economic_calendar_high_after_minutes,
-                medium_before_minutes=settings.economic_calendar_medium_before_minutes,
-                medium_after_minutes=settings.economic_calendar_medium_after_minutes,
-            )
-            news.extend(calendar_news)
-            successful_news_sources += 1
-        except EconomicCalendarError as exc:
-            failed_news_sources += 1
-            logger.warning("Economic calendar check failed: %s", exc)
-
-    if successful_news_sources == 0:
-        news_coverage = NewsCoverage.UNAVAILABLE
-    elif failed_news_sources:
-        news_coverage = NewsCoverage.PARTIAL
-    else:
-        news_coverage = NewsCoverage.COMPLETE
+    news, news_coverage, failed_news_sources = await _collect_signal_news(snapshot.symbol)
 
     trade_hint = build_hint(
         snapshot,
