@@ -1,13 +1,18 @@
 """RSS news ingestion and conservative market-impact scoring."""
 
+
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
+
 
 import feedparser
 import httpx
 
-from meta_trader_ai.models import NewsItem, NewsRisk
+
+from meta_trader_ai.models import NewsCoverage, NewsItem, NewsRisk
+
 
 HIGH_IMPACT_TERMS = {
     "interest rate": 35,
@@ -25,6 +30,7 @@ HIGH_IMPACT_TERMS = {
     "oil": 20,
 }
 
+
 CURRENCY_TERMS = {
     "USD": ("federal reserve", "fomc", "united states", "u.s.", "dollar", "bls", "eia"),
     "EUR": ("ecb", "eurozone", "european central bank", "euro"),
@@ -32,6 +38,8 @@ CURRENCY_TERMS = {
     "JPY": ("bank of japan", "japan", "yen"),
     "CHF": ("swiss national bank", "switzerland", "franc"),
 }
+
+
 
 
 def _score(title: str) -> tuple[int, set[str]]:
@@ -43,6 +51,16 @@ def _score(title: str) -> tuple[int, set[str]]:
         if any(term in text for term in terms)
     }
     return impact, currencies
+
+
+
+
+@dataclass(frozen=True, slots=True)
+class NewsCollection:
+    items: list[NewsItem]
+    coverage: NewsCoverage
+    failed_sources: int
+    total_sources: int
 
 
 async def fetch_feed(client: httpx.AsyncClient, url: str) -> list[NewsItem]:
@@ -74,6 +92,8 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> list[NewsItem]:
     return items
 
 
+
+
 def recent_news(
     items: list[NewsItem],
     lookback_hours: int,
@@ -91,18 +111,46 @@ def recent_news(
     ]
 
 
+
+
+async def collect_news_report(
+    urls: tuple[str, ...],
+    lookback_hours: int,
+) -> NewsCollection:
+    """Collect feeds while preserving source-health information."""
+    async with httpx.AsyncClient(
+        timeout=12,
+        headers={"User-Agent": "MT5-AI-Assistant/0.1"},
+    ) as client:
+        results = await asyncio.gather(
+            *(fetch_feed(client, url) for url in urls),
+            return_exceptions=True,
+        )
+
+    successful = [result for result in results if isinstance(result, list)]
+    failed_sources = len(results) - len(successful)
+    if not successful:
+        coverage = NewsCoverage.UNAVAILABLE
+    elif failed_sources:
+        coverage = NewsCoverage.PARTIAL
+    else:
+        coverage = NewsCoverage.COMPLETE
+
+    collected = [item for result in successful for item in result]
+    return NewsCollection(
+        items=recent_news(collected, lookback_hours),
+        coverage=coverage,
+        failed_sources=failed_sources,
+        total_sources=len(results),
+    )
+
+
 async def collect_news(
     urls: tuple[str, ...],
     lookback_hours: int,
 ) -> list[NewsItem]:
-    """Collect feeds concurrently and discard stale or undated items."""
-    async with httpx.AsyncClient(timeout=12, headers={"User-Agent": "MT5-AI-Assistant/0.1"}) as client:
-        results = await asyncio.gather(
-            *(fetch_feed(client, url) for url in urls), return_exceptions=True
-        )
-    collected = [item for result in results if isinstance(result, list) for item in result]
-    return recent_news(collected, lookback_hours)
-
+    """Backward-compatible news collector returning only usable items."""
+    return (await collect_news_report(urls, lookback_hours)).items
 
 def risk_for_symbol(symbol: str, items: list[NewsItem]) -> NewsRisk:
     """Calculate a conservative news-risk gate for a currency pair."""
