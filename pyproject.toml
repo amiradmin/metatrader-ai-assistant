@@ -17,6 +17,9 @@ dependencies = [
   "mcp>=1.26,<2",
 ]
 
+[project.scripts]
+simulate-yesterday = "meta_trader_ai.simulate_yesterday:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<9", "pytest-asyncio>=0.25,<1", "ruff>=0.9,<1"]
 
