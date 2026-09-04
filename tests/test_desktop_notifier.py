@@ -20,6 +20,7 @@ def payload(*, action: str = "WAIT", risk_guard_status: str = "OK") -> dict[str,
 def test_only_guarded_directional_hints_are_notifiable() -> None:
     assert is_notifiable(payload(action="BUY"))
     assert is_notifiable(payload(action="SELL"))
+    assert not is_notifiable(payload(action="BUY") | {"confidence": 74})
     assert not is_notifiable(payload())
     assert not is_notifiable(payload(action="BUY", risk_guard_status="DAILY_LOSS_LIMIT"))
 
