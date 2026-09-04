@@ -1,23 +1,29 @@
 """FastAPI entry point."""
 
+
 import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
 
+
 from fastapi import FastAPI, HTTPException
+
 
 from meta_trader_ai.bridge import SnapshotError, load_snapshot
 from meta_trader_ai.calendar_service import collect_calendar_news_resilient
 from meta_trader_ai.config import settings
-from meta_trader_ai.economic_calendar import EconomicCalendarError, fail_closed_guard
+from meta_trader_ai.economic_calendar import EconomicCalendarError
 from meta_trader_ai.market_structure import MarketStructureError, load_structure_context
-from meta_trader_ai.models import TipRanksContext, TradeHint
-from meta_trader_ai.news import collect_news
+from meta_trader_ai.models import NewsCoverage, TipRanksContext, TradeHint
+from meta_trader_ai.news import collect_news_report
 from meta_trader_ai.signals import build_hint
 from meta_trader_ai.tipranks import TipRanksContextError, load_context, save_context
 from meta_trader_ai.tipranks_mcp import TipRanksMcpError, fetch_forex_context
 
+
 logger = logging.getLogger(__name__)
+
+
 
 
 async def refresh_tipranks_context() -> TipRanksContext:
@@ -27,6 +33,7 @@ async def refresh_tipranks_context() -> TipRanksContext:
     if not settings.tipranks_mcp_api_key.strip():
         raise TipRanksMcpError("TIPRANKS_MCP_API_KEY is not configured")
 
+
     try:
         snapshot = load_snapshot(
             settings.mt5_snapshot_path,
@@ -34,6 +41,7 @@ async def refresh_tipranks_context() -> TipRanksContext:
         )
     except SnapshotError as exc:
         raise TipRanksMcpError(f"Cannot refresh without a fresh MT5 snapshot: {exc}") from exc
+
 
     context = await fetch_forex_context(
         snapshot.symbol,
@@ -49,6 +57,8 @@ async def refresh_tipranks_context() -> TipRanksContext:
     return context
 
 
+
+
 async def _tipranks_refresh_loop() -> None:
     """Refresh immediately, then periodically without blocking the signal API."""
     interval_seconds = max(5, settings.tipranks_refresh_minutes) * 60
@@ -60,6 +70,8 @@ async def _tipranks_refresh_loop() -> None:
         except Exception as exc:
             logger.warning("TipRanks auto-refresh skipped: %s", exc)
         await asyncio.sleep(interval_seconds)
+
+
 
 
 @asynccontextmanager
@@ -74,6 +86,7 @@ async def lifespan(app: FastAPI):
     ):
         refresh_task = asyncio.create_task(_tipranks_refresh_loop())
 
+
     try:
         yield
     finally:
@@ -83,11 +96,15 @@ async def lifespan(app: FastAPI):
                 await refresh_task
 
 
+
+
 app = FastAPI(
     title="MetaTrader AI Assistant",
     version="0.4.2",
     lifespan=lifespan,
 )
+
+
 
 
 @app.get("/health")
@@ -112,11 +129,15 @@ def health() -> dict[str, str]:
     }
 
 
+
+
 @app.put("/context/tipranks", response_model=TipRanksContext)
 def put_tipranks_context(context: TipRanksContext) -> TipRanksContext:
     """Store external TipRanks data locally; this never places or modifies orders."""
     save_context(settings.tipranks_context_path, context)
     return context
+
+
 
 
 @app.post("/context/tipranks/refresh", response_model=TipRanksContext)
@@ -126,6 +147,8 @@ async def refresh_tipranks_now() -> TipRanksContext:
         return await refresh_tipranks_context()
     except TipRanksMcpError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 
 
 @app.get("/hint", response_model=TradeHint)
@@ -138,6 +161,7 @@ async def hint() -> TradeHint:
     except SnapshotError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+
     market_structure_context = None
     if settings.market_structure_enabled:
         try:
@@ -148,6 +172,7 @@ async def hint() -> TradeHint:
             )
         except MarketStructureError:
             market_structure_context = None
+
 
     tipranks_context = None
     if settings.tipranks_context_enabled:
@@ -160,9 +185,19 @@ async def hint() -> TradeHint:
         except TipRanksContextError:
             tipranks_context = None
 
-    news = await collect_news(settings.rss_urls, settings.news_lookback_hours)
+
+    rss_news = await collect_news_report(
+        settings.rss_urls,
+        settings.news_lookback_hours,
+    )
+    news = list(rss_news.items)
+    total_news_sources = rss_news.total_sources
+    failed_news_sources = rss_news.failed_sources
+    successful_news_sources = total_news_sources - failed_news_sources
+
 
     if settings.economic_calendar_enabled:
+        total_news_sources += 1
         try:
             calendar_news = await collect_calendar_news_resilient(
                 snapshot.symbol,
@@ -194,10 +229,19 @@ async def hint() -> TradeHint:
                 ),
             )
             news.extend(calendar_news)
+            successful_news_sources += 1
         except EconomicCalendarError as exc:
+            failed_news_sources += 1
             logger.warning("Economic calendar check failed: %s", exc)
-            if settings.economic_calendar_fail_closed:
-                news.append(fail_closed_guard(snapshot.symbol, str(exc)))
+
+
+    if successful_news_sources == 0:
+        news_coverage = NewsCoverage.UNAVAILABLE
+    elif failed_news_sources:
+        news_coverage = NewsCoverage.PARTIAL
+    else:
+        news_coverage = NewsCoverage.COMPLETE
+
 
     return build_hint(
         snapshot,
@@ -205,4 +249,6 @@ async def hint() -> TradeHint:
         settings.max_risk_percent,
         tipranks_context=tipranks_context,
         market_structure_context=market_structure_context,
+        news_coverage=news_coverage,
+        failed_news_sources=failed_news_sources,
     )
