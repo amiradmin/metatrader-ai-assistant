@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     max_context_age_seconds: int = 90
     market_structure_enabled: bool = True
     max_risk_percent: float = 0.5
+    max_daily_loss_percent: float = 1.5
+    max_spread_atr_ratio: float = 0.25
     news_lookback_hours: int = 24
     high_impact_block_minutes: int = 30
 
