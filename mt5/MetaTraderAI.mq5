@@ -1,7 +1,7 @@
 // MetaTraderAI risk-profile wrapper.
-// The signal engine remains strict/fail-closed; the selected profile changes
-// DEMO execution intensity only. Real/contest account order placement remains
-// HARD BLOCKED by the core account check.
+// LOW/MEDIUM preserve the strict confirmation path. HIGH is an intentionally
+// aggressive DEMO-only stress-test profile. Real/contest order placement is
+// still HARD BLOCKED.
 
 #define OnInit MetaTraderAICore_OnInit
 #define OnTick MetaTraderAICore_OnTick
@@ -22,11 +22,13 @@ enum ENUM_MT_AI_RISK_MODE
    MT_AI_HIGH = 2
 };
 
-// LOW: conservative demo execution.
-// MEDIUM: two-ticket basket when the account is hedging.
-// HIGH: deliberately aggressive DEMO mode: up to five simultaneous tickets.
-// The quality gates (API BUY/SELL, strict confidence, H1/H4 confirmation,
-// news/risk/spread gates, anti-chase and candle confirmation) are still kept.
+// HIGH is intentionally wild for DEMO stress testing:
+// - confidence floor 50
+// - 10-ticket basket on hedging accounts
+// - 0.50% planned risk per ticket (about 5% for a full basket)
+// - if the strict API action is WAIT, direction is derived from technical_score
+// - MTF / anti-chase / pullback / rejection confirmation are bypassed in HIGH
+// - demo-only, risk guard, high-impact-news and spread gates remain hard stops
 input ENUM_MT_AI_RISK_MODE RiskMode = MT_AI_LOW;
 input bool RequireEntryConfirmation = true;
 
@@ -35,14 +37,14 @@ ulong NYWrapperLastObservedSignalMs = 0;
 
 string RiskModeName()
 {
-   if(RiskMode == MT_AI_HIGH) return "HIGH";
+   if(RiskMode == MT_AI_HIGH) return "HIGH DEMO";
    if(RiskMode == MT_AI_MEDIUM) return "MEDIUM";
    return "LOW";
 }
 
 int RiskModeMinConfidence()
 {
-   if(RiskMode == MT_AI_HIGH) return 75;
+   if(RiskMode == MT_AI_HIGH) return 50;
    if(RiskMode == MT_AI_MEDIUM) return 78;
    return 82;
 }
@@ -56,21 +58,21 @@ double RiskModePerOrderRiskPercent()
 
 int RiskModeRequestedPositions()
 {
-   if(RiskMode == MT_AI_HIGH) return 5;
+   if(RiskMode == MT_AI_HIGH) return 10;
    if(RiskMode == MT_AI_MEDIUM) return 2;
    return 1;
 }
 
 double RiskModeDailyLossLimitPercent()
 {
-   if(RiskMode == MT_AI_HIGH) return 5.0;
+   if(RiskMode == MT_AI_HIGH) return 15.0;
    if(RiskMode == MT_AI_MEDIUM) return 2.5;
    return 1.5;
 }
 
 int RiskModeMaxSpreadPoints()
 {
-   if(RiskMode == MT_AI_HIGH) return 70;
+   if(RiskMode == MT_AI_HIGH) return 100;
    if(RiskMode == MT_AI_MEDIUM) return 50;
    return 35;
 }
@@ -183,9 +185,6 @@ bool EntryCandleConfirmed(const string action)
    if(range <= 0.0)
       return false;
 
-   // Either a decisive body or a rejection wick is accepted, but the completed
-   // candle must continue in the requested direction and close on the correct
-   // side of EMA9. This prevents entering on a mere touch of the pullback zone.
    if(action == "BUY")
    {
       double lower_wick = MathMin(open1, close1) - low1;
@@ -200,6 +199,25 @@ bool EntryCandleConfirmed(const string action)
    return close1 < open1 && close1 < close2 && close1 <= ema9 && (impulse || rejection);
 }
 
+string HighDemoDirection(const string json)
+{
+   string api_action = JsonValue(json, "action");
+   if(api_action == "BUY" || api_action == "SELL")
+      return api_action;
+
+   int technical_score = (int)StringToInteger(JsonValue(json, "technical_score"));
+   if(technical_score > 0) return "BUY";
+   if(technical_score < 0) return "SELL";
+
+   // Exact zero is resolved by the latest completed M15 candle so HIGH mode
+   // still has a deterministic demo direction instead of a random coin flip.
+   double open1 = iOpen(TradeSymbol, PERIOD_M15, 1);
+   double close1 = iClose(TradeSymbol, PERIOD_M15, 1);
+   if(open1 <= 0.0 || close1 <= 0.0)
+      return "";
+   return close1 >= open1 ? "BUY" : "SELL";
+}
+
 bool BuildProfileTradePlan(
    const string action,
    const MqlTick &tick,
@@ -210,66 +228,35 @@ bool BuildProfileTradePlan(
    double &volume
 )
 {
-   double point = SymbolInfoDouble(TradeSymbol, SYMBOL_POINT);
-   if(point <= 0.0) return false;
-
-   double atr = 0.0;
-   if(!GetCompletedIndicatorValue(AtrHandle, atr)) return false;
-   entry = action == "BUY" ? tick.ask : tick.bid;
-
-   double stop_points = MathMax((double)MinStopPoints, (atr * AtrMultiplier) / point);
-   double swing_price = 0.0;
-   if(FindRecentConfirmedSwing(
-      action, PERIOD_M15, SwingLookbackBars,
-      SwingLeftBars, SwingRightBars, swing_price
+   double base_risk_money = 0.0;
+   double base_volume = 0.0;
+   if(!BuildTradePlan(
+      action,
+      tick,
+      entry,
+      stop,
+      target,
+      base_risk_money,
+      base_volume
    ))
-   {
-      double buffered_swing =
-         action == "BUY" ?
-         swing_price - StructureBufferPoints * point :
-         swing_price + StructureBufferPoints * point;
-      double structure_points =
-         action == "BUY" ?
-         (entry - buffered_swing) / point :
-         (buffered_swing - entry) / point;
-      if(
-         structure_points > stop_points &&
-         (MaxStopPoints <= 0 || structure_points <= MaxStopPoints)
-      )
-         stop_points = structure_points;
-   }
-
-   long broker_stops = SymbolInfoInteger(TradeSymbol, SYMBOL_TRADE_STOPS_LEVEL);
-   stop_points = MathMax(stop_points, (double)broker_stops + 5.0);
-   if(MaxStopPoints > 0 && stop_points > MaxStopPoints)
       return false;
 
-   int digits = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
-   if(action == "BUY")
-   {
-      stop = entry - stop_points * point;
-      target = entry + stop_points * RewardRiskRatio * point;
-   }
-   else
-   {
-      stop = entry + stop_points * point;
-      target = entry - stop_points * RewardRiskRatio * point;
-   }
-   stop = NormalizeDouble(stop, digits);
-   target = NormalizeDouble(target, digits);
+   double base_percent = MathMin(RiskPercent, HARD_MAX_RISK_PERCENT);
+   if(base_percent <= 0.0)
+      return false;
+
+   double ratio = RiskModePerOrderRiskPercent() / base_percent;
+   volume = NormalizeVolumeDown(base_volume * ratio);
+   if(volume <= 0.0)
+      return false;
 
    ENUM_ORDER_TYPE order_type = action == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   double one_lot_profit = 0.0;
-   if(!OrderCalcProfit(order_type, TradeSymbol, 1.0, entry, stop, one_lot_profit))
+   double stop_profit = 0.0;
+   if(!OrderCalcProfit(order_type, TradeSymbol, volume, entry, stop, stop_profit))
       return false;
 
-   double one_lot_loss = MathAbs(one_lot_profit);
-   if(one_lot_loss <= 0.0) return false;
-
-   double per_order_risk = MathMin(RiskModePerOrderRiskPercent(), HARD_MAX_RISK_PERCENT);
-   risk_money = AccountInfoDouble(ACCOUNT_EQUITY) * per_order_risk / 100.0;
-   volume = NormalizeVolumeDown(risk_money / one_lot_loss);
-   return volume > 0.0;
+   risk_money = MathAbs(stop_profit);
+   return risk_money > 0.0;
 }
 
 void MaybeProfileTrade(const string json)
@@ -283,19 +270,20 @@ void MaybeProfileTrade(const string json)
    if(current_bar <= 0 || current_bar == LastExecutedM15Bar)
       return;
 
-   string action = JsonValue(json, "action");
    string symbol = JsonValue(json, "symbol");
    string news_risk = JsonValue(json, "news_risk");
    string risk_guard = JsonValue(json, "risk_guard_status");
    string mtf_status = JsonValue(json, "mtf_status");
    int confidence = (int)StringToInteger(JsonValue(json, "confidence"));
+   bool high_demo = RiskMode == MT_AI_HIGH;
+   string action = high_demo ? HighDemoDirection(json) : JsonValue(json, "action");
 
    if(symbol != TradeSymbol) return;
    if(action != "BUY" && action != "SELL") return;
    if(confidence < RiskModeMinConfidence()) return;
    if(news_risk == "HIGH") return;
    if(risk_guard != "OK") return;
-   if(mtf_status != "CONFIRM") return;
+   if(!high_demo && mtf_status != "CONFIRM") return;
 
    long spread = SymbolInfoInteger(TradeSymbol, SYMBOL_SPREAD);
    if(RiskModeMaxSpreadPoints() > 0 && spread > RiskModeMaxSpreadPoints())
@@ -311,13 +299,25 @@ void MaybeProfileTrade(const string json)
       return;
 
    bool pullback_reentry = false;
-   if(!EntryTimingAllows(action, current_bar, pullback_reentry))
-      return;
-   if(!EntryCandleConfirmed(action))
+   if(!high_demo)
    {
-      if(Verbose)
-         Print("MetaTraderAI profile: waiting for completed M15 entry confirmation.");
-      return;
+      if(!EntryTimingAllows(action, current_bar, pullback_reentry))
+         return;
+      if(!EntryCandleConfirmed(action))
+      {
+         if(Verbose)
+            Print("MetaTraderAI profile: waiting for completed M15 entry confirmation.");
+         return;
+      }
+   }
+   else if(Verbose)
+   {
+      Print(
+         "MetaTraderAI HIGH DEMO: immediate basket armed. action=", action,
+         " confidence=", confidence,
+         " mtf=", mtf_status,
+         " (MTF/pullback/rejection bypassed in HIGH DEMO)"
+      );
    }
 
    Trade.SetAsyncMode(false);
@@ -477,8 +477,8 @@ int OnInit()
    DrawPanel("CONNECTING", "{}");
    DrawRiskModeBadge();
 
-   // Unlike the legacy core OnInit, this wrapper uses the profile-aware trade
-   // path on the first signal too, so there is no one-off strict-core order.
+   // ProfileRefreshSignal is used immediately so HIGH DEMO can open its basket
+   // as soon as the EA is attached/reloaded and the current hint is acceptable.
    ProfileRefreshSignal();
    LastSignalMs = GetTickCount64();
 
