@@ -7,6 +7,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from meta_trader_ai import economic_calendar as calendar_backend
 from meta_trader_ai.economic_calendar import (
     CalendarEvent,
     EconomicCalendarError,
@@ -119,6 +120,12 @@ def load_calendar_disk_cache(
     return events
 
 
+def _memory_cache_timestamp(url: str) -> datetime | None:
+    """Return the backend's actual last-good fetch time without extending freshness."""
+    cached = calendar_backend._cache.get(url)  # package-private shared backend state
+    return cached.fetched_at if cached is not None else None
+
+
 async def collect_calendar_news_resilient(
     symbol: str,
     url: str,
@@ -137,10 +144,10 @@ async def collect_calendar_news_resilient(
 ) -> list[NewsItem]:
     """Use live calendar data when possible, otherwise a bounded on-disk cache.
 
-    The persistent cache survives uvicorn/OS restarts. It is only written after a
-    successful provider fetch and is accepted for a limited age while its event
-    range still covers the current week. If neither live nor cached data is
-    trustworthy, the caller can keep the existing fail-closed trading guard.
+    The persistent cache survives uvicorn/OS restarts. Its timestamp is copied
+    from the backend's true last-good provider fetch, so repeated /hint requests
+    cannot make old calendar data look newer than it really is. If neither live
+    nor cached data is trustworthy, the caller keeps the fail-closed guard.
     """
     try:
         events = await fetch_calendar_events(
@@ -167,7 +174,11 @@ async def collect_calendar_news_resilient(
         )
     else:
         try:
-            save_calendar_disk_cache(disk_cache_path, events)
+            save_calendar_disk_cache(
+                disk_cache_path,
+                events,
+                fetched_at=_memory_cache_timestamp(url),
+            )
         except OSError as exc:
             logger.warning("Could not persist economic calendar cache: %s", exc)
 
