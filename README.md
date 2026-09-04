@@ -143,7 +143,7 @@ The panel displays connection status, symbol, WAIT/BUY/SELL decision, confidence
 
 ## Ubuntu desktop signal alerts
 
-`desktop-signal-notifier` polls the local `/hint` API and shows an Ubuntu desktop notification only when the already-guarded API response is `BUY` or `SELL` and `risk_guard_status` is `OK`. It never connects to a broker and never places an order. Alerts are deduplicated to one per symbol and completed M15 candle.
+`desktop-signal-notifier` polls the local `/hint` API and shows an Ubuntu desktop notification only when the already-guarded API response is `BUY` or `SELL`, `risk_guard_status` is `OK`, and confidence is at least the strict default of `75`. It never connects to a broker and never places an order. Alerts are deduplicated to one per symbol and completed M15 candle.
 
 Start the FastAPI service first, then run this in a second terminal:
 
