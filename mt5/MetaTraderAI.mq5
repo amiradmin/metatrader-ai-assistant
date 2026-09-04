@@ -24,8 +24,8 @@ enum ENUM_MT_AI_RISK_MODE
 
 // HIGH is intentionally wild for DEMO stress testing:
 // - confidence floor 50
-// - 10-ticket basket on hedging accounts
-// - 0.50% planned risk per ticket (about 5% for a full basket)
+// - 5-ticket basket on hedging accounts
+// - 0.50% planned risk per ticket (about 2.5% for a full basket)
 // - if the strict API action is WAIT, direction is derived from technical_score
 // - MTF / anti-chase / pullback / rejection confirmation are bypassed in HIGH
 // - demo-only, risk guard, high-impact-news and spread gates remain hard stops
@@ -58,7 +58,7 @@ double RiskModePerOrderRiskPercent()
 
 int RiskModeRequestedPositions()
 {
-   if(RiskMode == MT_AI_HIGH) return 10;
+   if(RiskMode == MT_AI_HIGH) return 5;
    if(RiskMode == MT_AI_MEDIUM) return 2;
    return 1;
 }
