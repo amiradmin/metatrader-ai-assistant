@@ -22,14 +22,17 @@ enum ENUM_MT_AI_RISK_MODE
    MT_AI_HIGH = 2
 };
 
-// HIGH is intentionally wild for DEMO stress testing:
-// - confidence floor 50
+// HIGH DEMO is deliberately extreme for stress testing:
+// - DEFAULT profile
+// - confidence floor 45
 // - 5-ticket basket on hedging accounts
-// - 0.50% planned risk per ticket (about 2.5% for a full basket)
-// - if the strict API action is WAIT, direction is derived from technical_score
+// - target 5% equity stop-risk PER ticket when sizing permits
+// - broker minimum-lot fallback is allowed only in HIGH DEMO
+// - actual projected basket stop-risk must remain below the 35% daily ceiling
+// - API WAIT can still become a direction from technical_score
 // - MTF / anti-chase / pullback / rejection confirmation are bypassed in HIGH
-// - demo-only, local daily-risk, high-impact-news and spread gates remain hard stops
-input ENUM_MT_AI_RISK_MODE RiskMode = MT_AI_LOW;
+// - real/contest accounts, HIGH-impact news and extreme spread remain hard stops
+input ENUM_MT_AI_RISK_MODE RiskMode = MT_AI_HIGH;
 input bool RequireEntryConfirmation = true;
 
 string RiskProfilePrefix = "MetaTraderAI_RiskProfile_";
@@ -44,14 +47,14 @@ string RiskModeName()
 
 int RiskModeMinConfidence()
 {
-   if(RiskMode == MT_AI_HIGH) return 50;
+   if(RiskMode == MT_AI_HIGH) return 45;
    if(RiskMode == MT_AI_MEDIUM) return 78;
    return 82;
 }
 
 double RiskModePerOrderRiskPercent()
 {
-   if(RiskMode == MT_AI_HIGH) return 0.50;
+   if(RiskMode == MT_AI_HIGH) return 5.00;
    if(RiskMode == MT_AI_MEDIUM) return 0.25;
    return 0.15;
 }
@@ -65,14 +68,14 @@ int RiskModeRequestedPositions()
 
 double RiskModeDailyLossLimitPercent()
 {
-   if(RiskMode == MT_AI_HIGH) return 15.0;
+   if(RiskMode == MT_AI_HIGH) return 35.0;
    if(RiskMode == MT_AI_MEDIUM) return 2.5;
    return 1.5;
 }
 
 int RiskModeMaxSpreadPoints()
 {
-   if(RiskMode == MT_AI_HIGH) return 100;
+   if(RiskMode == MT_AI_HIGH) return 150;
    if(RiskMode == MT_AI_MEDIUM) return 50;
    return 35;
 }
@@ -122,7 +125,7 @@ void DrawRiskModeBadge()
       "MODE: " + RiskModeName() +
       " | C" + IntegerToString(RiskModeMinConfidence()) +
       " | x" + IntegerToString(RiskModeEffectivePositions()) +
-      " | " + DoubleToString(RiskModePerOrderRiskPercent(), 2) + "% each"
+      " | " + DoubleToString(RiskModePerOrderRiskPercent(), 2) + "% target each"
    );
 }
 
@@ -153,12 +156,127 @@ bool ProfileDailyRiskAllows(const int additional_positions)
       if(Verbose)
       {
          Print(
-            "MetaTraderAI profile gate: projected risk ",
+            "MetaTraderAI profile gate: projected nominal risk ",
             DoubleToString(projected, 2),
             "% > ", DoubleToString(RiskModeDailyLossLimitPercent(), 2), "%"
          );
       }
       return false;
+   }
+   return true;
+}
+
+bool ManagedOpenStopRiskMoney(double &risk_money)
+{
+   risk_money = 0.0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != TradeSymbol)
+         continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      double current_price = PositionGetDouble(POSITION_PRICE_CURRENT);
+      double stop = PositionGetDouble(POSITION_SL);
+      if(volume <= 0.0 || current_price <= 0.0 || stop <= 0.0)
+      {
+         if(Verbose)
+            Print("MetaTraderAI HIGH DEMO: unable to measure existing stop risk.");
+         return false;
+      }
+
+      ENUM_POSITION_TYPE position_type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      ENUM_ORDER_TYPE order_type =
+         position_type == POSITION_TYPE_BUY ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+
+      double stop_profit = 0.0;
+      if(!OrderCalcProfit(
+         order_type, TradeSymbol, volume, current_price, stop, stop_profit
+      ))
+      {
+         if(Verbose)
+            Print("MetaTraderAI HIGH DEMO: OrderCalcProfit failed on open stop risk.");
+         return false;
+      }
+
+      // If SL is already beyond break-even there is no remaining downside risk.
+      risk_money += MathMax(0.0, -stop_profit);
+   }
+
+   return true;
+}
+
+bool ActualBasketRiskAllows(
+   const double new_order_risk_money,
+   const int new_positions,
+   const double requested_volume,
+   const double actual_volume
+)
+{
+   double realized_pnl = 0.0;
+   double day_start_balance = 0.0;
+   if(!AccountDayRiskMetrics(realized_pnl, day_start_balance))
+   {
+      if(Verbose)
+         Print("MetaTraderAI HIGH DEMO blocked: day-risk telemetry unavailable.");
+      return false;
+   }
+   if(day_start_balance <= 0.0 || new_order_risk_money <= 0.0 || new_positions <= 0)
+      return false;
+
+   double existing_open_risk_money = 0.0;
+   if(!ManagedOpenStopRiskMoney(existing_open_risk_money))
+      return false;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double drawdown_percent = MathMax(
+      0.0,
+      (day_start_balance - equity) / day_start_balance * 100.0
+   );
+   double basket_risk_money = new_order_risk_money * new_positions;
+   double basket_risk_percent = basket_risk_money / day_start_balance * 100.0;
+   double existing_risk_percent = existing_open_risk_money / day_start_balance * 100.0;
+   double projected_percent =
+      drawdown_percent + existing_risk_percent + basket_risk_percent;
+
+   if(projected_percent > RiskModeDailyLossLimitPercent())
+   {
+      Print(
+         "MetaTraderAI HIGH DEMO BLOCKED: requested volume=",
+         DoubleToString(requested_volume, 4),
+         " broker min=",
+         DoubleToString(SymbolInfoDouble(TradeSymbol, SYMBOL_VOLUME_MIN), 4),
+         " actual volume=", DoubleToString(actual_volume, 4),
+         " risk/order=$", DoubleToString(new_order_risk_money, 2),
+         " basket risk=", DoubleToString(basket_risk_percent, 2), "%",
+         " existing stop risk=", DoubleToString(existing_risk_percent, 2), "%",
+         " daily DD=", DoubleToString(drawdown_percent, 2), "%",
+         " projected=", DoubleToString(projected_percent, 2), "% > ",
+         DoubleToString(RiskModeDailyLossLimitPercent(), 2), "%"
+      );
+      return false;
+   }
+
+   if(Verbose)
+   {
+      Print(
+         "MetaTraderAI HIGH DEMO basket preflight OK: requested volume=",
+         DoubleToString(requested_volume, 4),
+         " actual volume=", DoubleToString(actual_volume, 4),
+         " risk/order=$", DoubleToString(new_order_risk_money, 2),
+         " x", new_positions,
+         " basket risk=", DoubleToString(basket_risk_percent, 2), "%",
+         " existing stop risk=", DoubleToString(existing_risk_percent, 2), "%",
+         " daily DD=", DoubleToString(drawdown_percent, 2), "%",
+         " projected=", DoubleToString(projected_percent, 2), "% / ",
+         DoubleToString(RiskModeDailyLossLimitPercent(), 2), "%"
+      );
    }
    return true;
 }
@@ -209,13 +327,145 @@ string HighDemoDirection(const string json)
    if(technical_score > 0) return "BUY";
    if(technical_score < 0) return "SELL";
 
-   // Exact zero is resolved by the latest completed M15 candle so HIGH mode
-   // still has a deterministic demo direction instead of a random coin flip.
    double open1 = iOpen(TradeSymbol, PERIOD_M15, 1);
    double close1 = iClose(TradeSymbol, PERIOD_M15, 1);
    if(open1 <= 0.0 || close1 <= 0.0)
       return "";
    return close1 >= open1 ? "BUY" : "SELL";
+}
+
+bool BuildHighDemoTradePlan(
+   const string action,
+   const MqlTick &tick,
+   double &entry,
+   double &stop,
+   double &target,
+   double &risk_money,
+   double &volume,
+   double &requested_volume,
+   bool &used_min_lot
+)
+{
+   risk_money = 0.0;
+   volume = 0.0;
+   requested_volume = 0.0;
+   used_min_lot = false;
+
+   double point = SymbolInfoDouble(TradeSymbol, SYMBOL_POINT);
+   if(point <= 0.0)
+      return false;
+
+   double atr = 0.0;
+   if(!GetCompletedIndicatorValue(AtrHandle, atr))
+   {
+      if(Verbose)
+         Print("MetaTraderAI HIGH DEMO plan failed: completed ATR unavailable.");
+      return false;
+   }
+
+   entry = action == "BUY" ? tick.ask : tick.bid;
+   double stop_points = MathMax((double)MinStopPoints, (atr * AtrMultiplier) / point);
+
+   double swing_price = 0.0;
+   if(FindRecentConfirmedSwing(
+      action, PERIOD_M15, SwingLookbackBars,
+      SwingLeftBars, SwingRightBars, swing_price
+   ))
+   {
+      double buffered_swing =
+         action == "BUY" ?
+         swing_price - StructureBufferPoints * point :
+         swing_price + StructureBufferPoints * point;
+      double structure_points =
+         action == "BUY" ?
+         (entry - buffered_swing) / point :
+         (buffered_swing - entry) / point;
+      if(
+         structure_points > stop_points &&
+         (MaxStopPoints <= 0 || structure_points <= MaxStopPoints)
+      )
+         stop_points = structure_points;
+   }
+
+   long broker_stops = SymbolInfoInteger(TradeSymbol, SYMBOL_TRADE_STOPS_LEVEL);
+   stop_points = MathMax(stop_points, (double)broker_stops + 5.0);
+   if(MaxStopPoints > 0 && stop_points > MaxStopPoints)
+   {
+      if(Verbose)
+         Print(
+            "MetaTraderAI HIGH DEMO plan failed: stop=",
+            DoubleToString(stop_points, 0),
+            " points > MaxStopPoints=", MaxStopPoints
+         );
+      return false;
+   }
+
+   int digits = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
+   if(action == "BUY")
+   {
+      stop = entry - stop_points * point;
+      target = entry + stop_points * RewardRiskRatio * point;
+   }
+   else
+   {
+      stop = entry + stop_points * point;
+      target = entry - stop_points * RewardRiskRatio * point;
+   }
+   stop = NormalizeDouble(stop, digits);
+   target = NormalizeDouble(target, digits);
+
+   ENUM_ORDER_TYPE order_type = action == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   double one_lot_profit = 0.0;
+   if(!OrderCalcProfit(order_type, TradeSymbol, 1.0, entry, stop, one_lot_profit))
+   {
+      if(Verbose)
+         Print("MetaTraderAI HIGH DEMO plan failed: OrderCalcProfit for 1 lot failed.");
+      return false;
+   }
+
+   double one_lot_loss = MathAbs(one_lot_profit);
+   if(one_lot_loss <= 0.0)
+      return false;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double target_risk_money = equity * RiskModePerOrderRiskPercent() / 100.0;
+   requested_volume = target_risk_money / one_lot_loss;
+   volume = NormalizeVolumeDown(requested_volume);
+
+   if(volume <= 0.0)
+   {
+      double minimum = SymbolInfoDouble(TradeSymbol, SYMBOL_VOLUME_MIN);
+      volume = NormalizeVolumeDown(minimum);
+      used_min_lot = volume > 0.0;
+   }
+
+   if(volume <= 0.0)
+   {
+      Print(
+         "MetaTraderAI HIGH DEMO plan failed: requested volume=",
+         DoubleToString(requested_volume, 4),
+         " broker min=",
+         DoubleToString(SymbolInfoDouble(TradeSymbol, SYMBOL_VOLUME_MIN), 4),
+         " could not produce a valid volume."
+      );
+      return false;
+   }
+
+   double stop_profit = 0.0;
+   if(!OrderCalcProfit(order_type, TradeSymbol, volume, entry, stop, stop_profit))
+      return false;
+   risk_money = MathAbs(stop_profit);
+
+   if(Verbose && used_min_lot)
+   {
+      Print(
+         "MetaTraderAI HIGH DEMO min-lot fallback: requested=",
+         DoubleToString(requested_volume, 4),
+         " -> actual=", DoubleToString(volume, 4),
+         " actual stop risk=$", DoubleToString(risk_money, 2)
+      );
+   }
+   return risk_money > 0.0;
 }
 
 bool BuildProfileTradePlan(
@@ -225,9 +475,22 @@ bool BuildProfileTradePlan(
    double &stop,
    double &target,
    double &risk_money,
-   double &volume
+   double &volume,
+   double &requested_volume,
+   bool &used_min_lot
 )
 {
+   requested_volume = 0.0;
+   used_min_lot = false;
+
+   if(RiskMode == MT_AI_HIGH)
+   {
+      return BuildHighDemoTradePlan(
+         action, tick, entry, stop, target,
+         risk_money, volume, requested_volume, used_min_lot
+      );
+   }
+
    double base_risk_money = 0.0;
    double base_volume = 0.0;
    if(!BuildTradePlan(
@@ -246,7 +509,8 @@ bool BuildProfileTradePlan(
       return false;
 
    double ratio = RiskModePerOrderRiskPercent() / base_percent;
-   volume = NormalizeVolumeDown(base_volume * ratio);
+   requested_volume = base_volume * ratio;
+   volume = NormalizeVolumeDown(requested_volume);
    if(volume <= 0.0)
       return false;
 
@@ -289,15 +553,21 @@ void MaybeProfileTrade(const string json)
    {
       Print(
          "MetaTraderAI HIGH DEMO: API risk_guard=", risk_guard,
-         " overridden by local ",
-         DoubleToString(RiskModeDailyLossLimitPercent(), 2),
-         "% daily-risk profile gate."
+         " overridden by local actual-risk ceiling ",
+         DoubleToString(RiskModeDailyLossLimitPercent(), 2), "%"
       );
    }
 
    long spread = SymbolInfoInteger(TradeSymbol, SYMBOL_SPREAD);
    if(RiskModeMaxSpreadPoints() > 0 && spread > RiskModeMaxSpreadPoints())
+   {
+      if(Verbose)
+         Print(
+            "MetaTraderAI profile blocked: spread=", spread,
+            " > limit=", RiskModeMaxSpreadPoints(), " points."
+         );
       return;
+   }
 
    int target_positions = RiskModeEffectivePositions();
    int open_positions = ManagedOpenPositions();
@@ -323,11 +593,47 @@ void MaybeProfileTrade(const string json)
    else if(Verbose)
    {
       Print(
-         "MetaTraderAI HIGH DEMO: immediate basket armed. action=", action,
+         "MetaTraderAI HIGH DEMO: aggressive basket armed. action=", action,
          " confidence=", confidence,
          " mtf=", mtf_status,
-         " (MTF/pullback/rejection bypassed in HIGH DEMO)"
+         " target_positions=", target_positions,
+         " risk_target_each=", DoubleToString(RiskModePerOrderRiskPercent(), 2), "%"
       );
+   }
+
+   // Preflight one current plan so HIGH can validate the ACTUAL stop-risk of
+   // the entire basket, including broker minimum-lot fallback, before order #1.
+   if(high_demo)
+   {
+      MqlTick preflight_tick;
+      if(!SymbolInfoTick(TradeSymbol, preflight_tick))
+         return;
+
+      double pre_entry = 0.0;
+      double pre_stop = 0.0;
+      double pre_target = 0.0;
+      double pre_risk_money = 0.0;
+      double pre_volume = 0.0;
+      double pre_requested_volume = 0.0;
+      bool pre_used_min_lot = false;
+      if(!BuildProfileTradePlan(
+         action, preflight_tick,
+         pre_entry, pre_stop, pre_target,
+         pre_risk_money, pre_volume,
+         pre_requested_volume, pre_used_min_lot
+      ))
+      {
+         Print("MetaTraderAI HIGH DEMO blocked: trade-plan preflight failed.");
+         return;
+      }
+
+      if(!ActualBasketRiskAllows(
+         pre_risk_money,
+         positions_to_open,
+         pre_requested_volume,
+         pre_volume
+      ))
+         return;
    }
 
    Trade.SetAsyncMode(false);
@@ -347,8 +653,22 @@ void MaybeProfileTrade(const string json)
       double target = 0.0;
       double risk_money = 0.0;
       double volume = 0.0;
-      if(!BuildProfileTradePlan(action, tick, entry, stop, target, risk_money, volume))
+      double requested_volume = 0.0;
+      bool used_min_lot = false;
+      if(!BuildProfileTradePlan(
+         action, tick,
+         entry, stop, target,
+         risk_money, volume,
+         requested_volume, used_min_lot
+      ))
+      {
+         Print(
+            "MetaTraderAI ", RiskModeName(),
+            " order plan failed at basket ticket ", i + 1,
+            "/", positions_to_open
+         );
          break;
+      }
 
       string comment =
          "MetaTraderAI " + RiskModeName() + " " +
@@ -372,14 +692,17 @@ void MaybeProfileTrade(const string json)
       opened++;
       if(Verbose)
       {
+         double equity = MathMax(1.0, AccountInfoDouble(ACCOUNT_EQUITY));
          Print(
             "MetaTraderAI ", RiskModeName(), " opened ", action,
             " #", opened,
             " volume=", DoubleToString(volume, 3),
+            " requested=", DoubleToString(requested_volume, 4),
+            " min_lot_fallback=", used_min_lot,
             " risk=$", DoubleToString(risk_money, 2),
+            " (", DoubleToString(risk_money / equity * 100.0, 2), "%)",
             " SL=", DoubleToString(stop, _Digits),
-            " TP=", DoubleToString(target, _Digits),
-            " pullback=", pullback_reentry
+            " TP=", DoubleToString(target, _Digits)
          );
       }
    }
@@ -487,8 +810,6 @@ int OnInit()
    DrawPanel("CONNECTING", "{}");
    DrawRiskModeBadge();
 
-   // ProfileRefreshSignal is used immediately so HIGH DEMO can open its basket
-   // as soon as the EA is attached/reloaded and the current hint is acceptable.
    ProfileRefreshSignal();
    LastSignalMs = GetTickCount64();
 
@@ -502,7 +823,8 @@ int OnInit()
       "MetaTraderAI ready: mode=", RiskModeName(),
       " demo_auto=", TradingArmed,
       " max_positions=", RiskModeEffectivePositions(),
-      " risk_each=", DoubleToString(RiskModePerOrderRiskPercent(), 2), "%"
+      " target_risk_each=", DoubleToString(RiskModePerOrderRiskPercent(), 2), "%",
+      " daily_ceiling=", DoubleToString(RiskModeDailyLossLimitPercent(), 2), "%"
    );
    return INIT_SUCCEEDED;
 }
