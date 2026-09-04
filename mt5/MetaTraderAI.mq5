@@ -1,5 +1,5 @@
 #property strict
-#property description "ONE EA: bridge + readable panel + DEMO auto trader + demo journal + demo goal"
+#property description "ONE EA: bridge + panel + DEMO auto trader + journal + demo goal + paper shadow comparison"
 
 #include <Trade/Trade.mqh>
 
@@ -26,7 +26,7 @@ input double DemoDailyGoalUSD = 10.0;
 input int DemoGoalWindowDays = 20;
 
 // -----------------------------------------------------------------------------
-// Demo execution
+// Demo execution - this is the only path that can place orders
 // -----------------------------------------------------------------------------
 input bool EnableAutoTrading = true;
 input int MinConfidence = 75;
@@ -49,6 +49,17 @@ input bool UseAntiChase = true;
 input double MaxExtensionAtr = 1.5;
 input double PullbackZoneAtr = 0.35;
 input int PullbackMaxBars = 4;
+
+// -----------------------------------------------------------------------------
+// Paper-only shadow comparison. These NEVER place MT5 orders.
+// They use the same execution/risk/anti-chase rules as the strict EA and only
+// change the confidence threshold, so the comparison isolates confidence.
+// -----------------------------------------------------------------------------
+input bool EnableShadowMode = true;
+input int ShadowConfidenceA = 72;
+input int ShadowConfidenceB = 70;
+input bool ExportShadowJournal = true;
+input string ShadowJournalFile = "shadow_trade_journal.csv";
 
 // -----------------------------------------------------------------------------
 // Files
@@ -79,10 +90,39 @@ string LastApiPayload = "{}";
 string LastPanelStatus = "STARTING";
 
 double DemoTodayPnl = 0.0;
+int DemoTodayTrades = 0;
 double DemoGoalAverage = 0.0;
 double DemoGoalProgress = 0.0;
 int DemoGoalObservedDays = 0;
 string DemoGoalStatus = "COLLECTING 0/20";
+
+struct ShadowState
+{
+   int min_confidence;
+   bool open;
+   string action;
+   int confidence;
+   string entry_type;
+   double entry;
+   double stop;
+   double target;
+   double volume;
+   double risk_money;
+   datetime opened_at;
+   datetime last_executed_m15_bar;
+   string pending_action;
+   datetime pending_started_bar;
+   int entries_today;
+   int wins_today;
+   int losses_today;
+   double pnl_today;
+   double balance;
+   double day_start_balance;
+   datetime stats_day;
+};
+
+ShadowState ShadowA;
+ShadowState ShadowB;
 
 struct PositionAggregate
 {
@@ -184,6 +224,11 @@ string ValueOr(const string value, const string fallback)
    return value;
 }
 
+string SignedMoney(const double value)
+{
+   return (value >= 0.0 ? "+$" : "-$") + DoubleToString(MathAbs(value), 2);
+}
+
 bool WriteTextFile(const string file_name, const string payload)
 {
    int handle = FileOpen(file_name, FILE_WRITE | FILE_TXT | FILE_ANSI);
@@ -272,6 +317,118 @@ bool IsWeekday(const datetime value)
    return parts.day_of_week >= 1 && parts.day_of_week <= 5;
 }
 
+void InitShadowState(ShadowState &state, const int threshold)
+{
+   state.min_confidence = threshold;
+   state.open = false;
+   state.action = "";
+   state.confidence = 0;
+   state.entry_type = "";
+   state.entry = 0.0;
+   state.stop = 0.0;
+   state.target = 0.0;
+   state.volume = 0.0;
+   state.risk_money = 0.0;
+   state.opened_at = 0;
+   state.last_executed_m15_bar = 0;
+   state.pending_action = "";
+   state.pending_started_bar = 0;
+   state.entries_today = 0;
+   state.wins_today = 0;
+   state.losses_today = 0;
+   state.pnl_today = 0.0;
+   state.balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(state.balance <= 0.0)
+      state.balance = AccountInfoDouble(ACCOUNT_EQUITY);
+   state.day_start_balance = state.balance;
+   state.stats_day = BrokerDayStart();
+}
+
+void RefreshShadowDay(ShadowState &state)
+{
+   datetime today = BrokerDayStart();
+   if(state.stats_day == today)
+      return;
+
+   state.stats_day = today;
+   state.entries_today = 0;
+   state.wins_today = 0;
+   state.losses_today = 0;
+   state.pnl_today = 0.0;
+   state.day_start_balance = state.balance;
+}
+
+void InitializeShadowJournal()
+{
+   if(!ExportShadowJournal)
+      return;
+
+   int handle = FileOpen(
+      ShadowJournalFile,
+      FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI,
+      ','
+   );
+   if(handle == INVALID_HANDLE)
+      handle = FileOpen(ShadowJournalFile, FILE_WRITE | FILE_CSV | FILE_ANSI, ',');
+   if(handle == INVALID_HANDLE)
+   {
+      Print("MetaTraderAI shadow: cannot open journal. error=", GetLastError());
+      return;
+   }
+
+   if(FileSize(handle) == 0)
+   {
+      FileWrite(
+         handle,
+         "threshold", "confidence", "opened_at_broker", "closed_at_broker",
+         "side", "entry_type", "entry", "stop", "target", "exit",
+         "volume", "risk_money", "pnl_usd", "outcome"
+      );
+   }
+   FileClose(handle);
+}
+
+void AppendShadowJournal(
+   ShadowState &state,
+   const datetime closed_at,
+   const double exit_price,
+   const double pnl,
+   const string outcome
+)
+{
+   if(!ExportShadowJournal)
+      return;
+
+   int handle = FileOpen(
+      ShadowJournalFile,
+      FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI,
+      ','
+   );
+   if(handle == INVALID_HANDLE)
+      return;
+
+   FileSeek(handle, 0, SEEK_END);
+   int digits = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
+   FileWrite(
+      handle,
+      state.min_confidence,
+      state.confidence,
+      BrokerTimestamp(state.opened_at),
+      BrokerTimestamp(closed_at),
+      state.action,
+      state.entry_type,
+      DoubleToString(state.entry, digits),
+      DoubleToString(state.stop, digits),
+      DoubleToString(state.target, digits),
+      DoubleToString(exit_price, digits),
+      DoubleToString(state.volume, 4),
+      DoubleToString(state.risk_money, 2),
+      DoubleToString(pnl, 2),
+      outcome
+   );
+   FileClose(handle);
+}
+
 bool AccountDayRiskMetrics(double &realized_pnl, double &day_start_balance)
 {
    realized_pnl = 0.0;
@@ -325,6 +482,7 @@ double DealNetPnl(const ulong deal)
 bool UpdateDemoGoalStats()
 {
    DemoTodayPnl = 0.0;
+   DemoTodayTrades = 0;
    DemoGoalAverage = 0.0;
    DemoGoalProgress = 0.0;
    DemoGoalObservedDays = 0;
@@ -357,7 +515,13 @@ bool UpdateDemoGoalStats()
          (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
 
       if(deal_time >= today_start)
+      {
          DemoTodayPnl += DealNetPnl(deal);
+         ENUM_DEAL_ENTRY entry_kind =
+            (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY);
+         if(entry_kind == DEAL_ENTRY_OUT || entry_kind == DEAL_ENTRY_OUT_BY)
+            DemoTodayTrades++;
+      }
 
       if(earliest_managed == 0 || deal_time < earliest_managed)
          earliest_managed = deal_time;
@@ -569,6 +733,16 @@ color GoalColor()
    return clrGold;
 }
 
+string ShadowPanelText(ShadowState &state)
+{
+   string open_text = state.open ? " | OPEN" : "";
+   return
+      "Shadow C" + IntegerToString(state.min_confidence) + " PAPER: " +
+      IntegerToString(state.entries_today) + " entries | W" +
+      IntegerToString(state.wins_today) + "/L" + IntegerToString(state.losses_today) +
+      " | " + SignedMoney(state.pnl_today) + open_text;
+}
+
 void DrawPanel(const string status, const string json)
 {
    string action = ValueOr(JsonValue(json, "action"), "WAIT");
@@ -593,7 +767,7 @@ void DrawPanel(const string status, const string json)
    SetPanelLine("Decision", "Decision: " + action, 152, PanelFontSize + 3, ActionColor(action));
    SetPanelLine(
       "Confidence",
-      "Confidence: " + confidence + " / 100   |   Min: " + IntegerToString(MinConfidence),
+      "Confidence: " + confidence + " / 100   |   Strict min: " + IntegerToString(MinConfidence),
       190,
       PanelFontSize,
       clrWhite
@@ -621,10 +795,10 @@ void DrawPanel(const string status, const string json)
    );
    SetPanelLine(
       "Goal",
-      "Demo goal: $" + DoubleToString(DemoDailyGoalUSD, 2) + "/day   |   Today: " +
-         (DemoTodayPnl >= 0.0 ? "+$" : "-$") + DoubleToString(MathAbs(DemoTodayPnl), 2),
-      328,
-      PanelFontSize,
+      "Strict75 today: " + IntegerToString(DemoTodayTrades) + " closed | " +
+         SignedMoney(DemoTodayPnl) + "   |   Goal: $" + DoubleToString(DemoDailyGoalUSD, 2) + "/day",
+      326,
+      PanelFontSize - 1,
       GoalColor()
    );
    SetPanelLine(
@@ -632,11 +806,23 @@ void DrawPanel(const string status, const string json)
       IntegerToString(DemoGoalWindowDays) + "D avg: " +
          (DemoGoalAverage >= 0.0 ? "+$" : "-$") + DoubleToString(MathAbs(DemoGoalAverage), 2) +
          "/day   |   Progress: " + DoubleToString(DemoGoalProgress, 0) + "%   |   " + DemoGoalStatus,
-      362,
-      PanelFontSize - 1,
+      354,
+      PanelFontSize - 2,
       GoalColor()
    );
-   SetPanelLine("Time", "UTC: " + generated_at, 402, PanelFontSize - 2, clrSilver);
+
+   if(EnableShadowMode)
+   {
+      SetPanelLine("ShadowA", ShadowPanelText(ShadowA), 382, PanelFontSize - 3, clrDeepSkyBlue);
+      SetPanelLine("ShadowB", ShadowPanelText(ShadowB), 404, PanelFontSize - 3, clrDeepSkyBlue);
+   }
+   else
+   {
+      SetPanelLine("ShadowA", "Shadow PAPER: OFF", 382, PanelFontSize - 3, clrSilver);
+      SetPanelLine("ShadowB", "", 404, PanelFontSize - 3, clrSilver);
+   }
+
+   SetPanelLine("Time", "UTC: " + generated_at, 426, PanelFontSize - 4, clrSilver);
    ChartRedraw();
 }
 
@@ -644,7 +830,8 @@ void DeletePanel()
 {
    string ids[] = {
       "BG", "Hello", "Title", "Status", "Symbol", "Decision",
-      "Confidence", "Technical", "News", "Risk", "Goal", "GoalState", "Time"
+      "Confidence", "Technical", "News", "Risk", "Goal", "GoalState",
+      "ShadowA", "ShadowB", "Time"
    };
    for(int i = 0; i < ArraySize(ids); i++)
       ObjectDelete(0, PanelPrefix + ids[i]);
@@ -849,6 +1036,84 @@ bool EntryTimingAllows(
    return false;
 }
 
+bool ShadowEntryTimingAllows(
+   ShadowState &state,
+   const string action,
+   const datetime current_bar,
+   bool &pullback_reentry
+)
+{
+   pullback_reentry = false;
+   if(!UseAntiChase) return true;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(TradeSymbol, tick)) return false;
+
+   double atr = 0.0;
+   double ema9 = 0.0;
+   double ema21 = 0.0;
+   if(!GetCompletedIndicatorValue(AtrHandle, atr)) return false;
+   if(!GetCompletedIndicatorValue(Ema9Handle, ema9)) return false;
+   if(!GetCompletedIndicatorValue(Ema21Handle, ema21)) return false;
+
+   double entry = action == "BUY" ? tick.ask : tick.bid;
+   double extension_atr =
+      action == "BUY" ? (entry - ema21) / atr : (ema21 - entry) / atr;
+
+   if(state.pending_action != "" && state.pending_action != action)
+   {
+      state.pending_action = "";
+      state.pending_started_bar = 0;
+   }
+
+   if(state.pending_action == "")
+   {
+      if(extension_atr > MaxExtensionAtr)
+      {
+         state.pending_action = action;
+         state.pending_started_bar = current_bar;
+         return false;
+      }
+      return true;
+   }
+
+   int shift = iBarShift(TradeSymbol, PERIOD_M15, state.pending_started_bar, false);
+   if(shift < 0 || shift > PullbackMaxBars)
+   {
+      state.pending_action = "";
+      state.pending_started_bar = 0;
+      return false;
+   }
+   if(extension_atr > MaxExtensionAtr)
+      return false;
+
+   bool trend_aligned;
+   double distance_atr;
+   bool reclaimed;
+   if(action == "BUY")
+   {
+      trend_aligned = ema9 > ema21;
+      distance_atr = (entry - ema9) / atr;
+      reclaimed = entry >= ema9 && entry >= ema21;
+   }
+   else
+   {
+      trend_aligned = ema9 < ema21;
+      distance_atr = (ema9 - entry) / atr;
+      reclaimed = entry <= ema9 && entry <= ema21;
+   }
+
+   bool in_zone = distance_atr >= 0.0 && distance_atr <= PullbackZoneAtr;
+   if(trend_aligned && reclaimed && in_zone)
+   {
+      pullback_reentry = true;
+      state.pending_action = "";
+      state.pending_started_bar = 0;
+      return true;
+   }
+   return false;
+}
+
 bool BuildTradePlan(
    const string action,
    const MqlTick &tick,
@@ -919,6 +1184,273 @@ bool BuildTradePlan(
    risk_money = AccountInfoDouble(ACCOUNT_EQUITY) * effective_risk / 100.0;
    volume = NormalizeVolumeDown(risk_money / one_lot_loss);
    return volume > 0.0;
+}
+
+bool BuildShadowPlan(
+   const string action,
+   const MqlTick &tick,
+   const double shadow_balance,
+   double &entry,
+   double &stop,
+   double &target,
+   double &risk_money,
+   double &volume
+)
+{
+   if(shadow_balance <= 0.0)
+      return false;
+
+   double point = SymbolInfoDouble(TradeSymbol, SYMBOL_POINT);
+   if(point <= 0.0) return false;
+
+   double atr = 0.0;
+   if(!GetCompletedIndicatorValue(AtrHandle, atr)) return false;
+   entry = action == "BUY" ? tick.ask : tick.bid;
+
+   double stop_points = MathMax((double)MinStopPoints, (atr * AtrMultiplier) / point);
+   double swing_price = 0.0;
+   if(FindRecentConfirmedSwing(
+      action, PERIOD_M15, SwingLookbackBars,
+      SwingLeftBars, SwingRightBars, swing_price
+   ))
+   {
+      double buffered_swing =
+         action == "BUY" ?
+         swing_price - StructureBufferPoints * point :
+         swing_price + StructureBufferPoints * point;
+      double structure_points =
+         action == "BUY" ?
+         (entry - buffered_swing) / point :
+         (buffered_swing - entry) / point;
+      if(
+         structure_points > stop_points &&
+         (MaxStopPoints <= 0 || structure_points <= MaxStopPoints)
+      )
+         stop_points = structure_points;
+   }
+
+   long broker_stops = SymbolInfoInteger(TradeSymbol, SYMBOL_TRADE_STOPS_LEVEL);
+   stop_points = MathMax(stop_points, (double)broker_stops + 5.0);
+   if(MaxStopPoints > 0 && stop_points > MaxStopPoints)
+      return false;
+
+   int digits = (int)SymbolInfoInteger(TradeSymbol, SYMBOL_DIGITS);
+   if(action == "BUY")
+   {
+      stop = entry - stop_points * point;
+      target = entry + stop_points * RewardRiskRatio * point;
+   }
+   else
+   {
+      stop = entry + stop_points * point;
+      target = entry - stop_points * RewardRiskRatio * point;
+   }
+   stop = NormalizeDouble(stop, digits);
+   target = NormalizeDouble(target, digits);
+
+   ENUM_ORDER_TYPE order_type = action == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   double one_lot_profit = 0.0;
+   if(!OrderCalcProfit(order_type, TradeSymbol, 1.0, entry, stop, one_lot_profit))
+      return false;
+   double one_lot_loss = MathAbs(one_lot_profit);
+   if(one_lot_loss <= 0.0)
+      return false;
+
+   double effective_risk = MathMin(RiskPercent, HARD_MAX_RISK_PERCENT);
+   double requested_risk = shadow_balance * effective_risk / 100.0;
+   volume = NormalizeVolumeDown(requested_risk / one_lot_loss);
+   if(volume <= 0.0)
+      return false;
+
+   double actual_stop_profit = 0.0;
+   if(!OrderCalcProfit(order_type, TradeSymbol, volume, entry, stop, actual_stop_profit))
+      return false;
+   risk_money = MathAbs(actual_stop_profit);
+   return risk_money > 0.0;
+}
+
+void CloseShadowPosition(
+   ShadowState &state,
+   const double exit_price,
+   const string outcome
+)
+{
+   if(!state.open)
+      return;
+
+   ENUM_ORDER_TYPE order_type =
+      state.action == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   double pnl = 0.0;
+   if(!OrderCalcProfit(
+      order_type,
+      TradeSymbol,
+      state.volume,
+      state.entry,
+      exit_price,
+      pnl
+   ))
+   {
+      pnl = outcome == "TARGET" ?
+         state.risk_money * RewardRiskRatio : -state.risk_money;
+   }
+
+   state.balance += pnl;
+   state.pnl_today += pnl;
+   if(outcome == "TARGET") state.wins_today++;
+   else if(outcome == "STOP") state.losses_today++;
+
+   AppendShadowJournal(state, TimeCurrent(), exit_price, pnl, outcome);
+
+   if(Verbose)
+   {
+      Print(
+         "MetaTraderAI shadow C", state.min_confidence,
+         " closed ", outcome,
+         " pnl=", DoubleToString(pnl, 2),
+         " balance=", DoubleToString(state.balance, 2)
+      );
+   }
+
+   state.open = false;
+   state.action = "";
+   state.confidence = 0;
+   state.entry_type = "";
+   state.entry = 0.0;
+   state.stop = 0.0;
+   state.target = 0.0;
+   state.volume = 0.0;
+   state.risk_money = 0.0;
+   state.opened_at = 0;
+}
+
+void UpdateShadowPosition(ShadowState &state)
+{
+   RefreshShadowDay(state);
+   if(!state.open)
+      return;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(TradeSymbol, tick))
+      return;
+
+   if(state.action == "BUY")
+   {
+      if(tick.bid <= state.stop)
+         CloseShadowPosition(state, state.stop, "STOP");
+      else if(tick.bid >= state.target)
+         CloseShadowPosition(state, state.target, "TARGET");
+   }
+   else if(state.action == "SELL")
+   {
+      if(tick.ask >= state.stop)
+         CloseShadowPosition(state, state.stop, "STOP");
+      else if(tick.ask <= state.target)
+         CloseShadowPosition(state, state.target, "TARGET");
+   }
+}
+
+void UpdateShadowPositions()
+{
+   if(!EnableShadowMode)
+      return;
+   UpdateShadowPosition(ShadowA);
+   UpdateShadowPosition(ShadowB);
+}
+
+void MaybeShadowOne(ShadowState &state, const string json)
+{
+   RefreshShadowDay(state);
+   UpdateShadowPosition(state);
+   if(state.open)
+      return;
+
+   datetime current_bar = iTime(TradeSymbol, PERIOD_M15, 0);
+   if(current_bar <= 0 || current_bar == state.last_executed_m15_bar)
+      return;
+
+   string action = JsonValue(json, "action");
+   string symbol = JsonValue(json, "symbol");
+   string news_risk = JsonValue(json, "news_risk");
+   int confidence = (int)StringToInteger(JsonValue(json, "confidence"));
+
+   if(symbol != TradeSymbol) return;
+   if(action != "BUY" && action != "SELL") return;
+   if(confidence < state.min_confidence) return;
+   if(news_risk == "HIGH") return;
+
+   long spread = SymbolInfoInteger(TradeSymbol, SYMBOL_SPREAD);
+   if(MaxSpreadPoints > 0 && spread > MaxSpreadPoints)
+      return;
+
+   if(state.day_start_balance <= 0.0)
+      return;
+   double day_drawdown = MathMax(
+      0.0,
+      (state.day_start_balance - state.balance) / state.day_start_balance * 100.0
+   );
+   if(day_drawdown >= 1.5)
+      return;
+   if(day_drawdown + MathMin(RiskPercent, HARD_MAX_RISK_PERCENT) > 1.5)
+      return;
+
+   bool pullback_reentry = false;
+   if(!ShadowEntryTimingAllows(state, action, current_bar, pullback_reentry))
+      return;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(TradeSymbol, tick))
+      return;
+
+   double entry = 0.0;
+   double stop = 0.0;
+   double target = 0.0;
+   double risk_money = 0.0;
+   double volume = 0.0;
+   if(!BuildShadowPlan(
+      action,
+      tick,
+      state.balance,
+      entry,
+      stop,
+      target,
+      risk_money,
+      volume
+   ))
+      return;
+
+   state.open = true;
+   state.action = action;
+   state.confidence = confidence;
+   state.entry_type = pullback_reentry ? "PULLBACK" : "NORMAL";
+   state.entry = entry;
+   state.stop = stop;
+   state.target = target;
+   state.volume = volume;
+   state.risk_money = risk_money;
+   state.opened_at = TimeCurrent();
+   state.last_executed_m15_bar = current_bar;
+   state.entries_today++;
+
+   if(Verbose)
+   {
+      Print(
+         "MetaTraderAI shadow C", state.min_confidence,
+         " PAPER opened ", action,
+         " conf=", confidence,
+         " volume=", DoubleToString(volume, 3),
+         " SL=", DoubleToString(stop, _Digits),
+         " TP=", DoubleToString(target, _Digits),
+         " pullback=", pullback_reentry
+      );
+   }
+}
+
+void MaybeShadow(const string json)
+{
+   if(!EnableShadowMode)
+      return;
+   MaybeShadowOne(ShadowA, json);
+   MaybeShadowOne(ShadowB, json);
 }
 
 bool TradeResultAccepted()
@@ -1198,8 +1730,12 @@ void RefreshSignal()
 
    LastApiPayload = response;
    LastPanelStatus = "CONNECTED";
-   DrawPanel("CONNECTED", response);
+
+   // Paper shadow is evaluated before the strict order path, but it never calls
+   // CTrade or any MT5 order function.
+   MaybeShadow(response);
    MaybeTrade(response);
+   DrawPanel("CONNECTED", response);
 }
 
 int OnInit()
@@ -1239,6 +1775,15 @@ int OnInit()
    )
       return INIT_PARAMETERS_INCORRECT;
 
+   if(
+      EnableShadowMode &&
+      (
+         ShadowConfidenceA < 0 || ShadowConfidenceA > MinConfidence ||
+         ShadowConfidenceB < 0 || ShadowConfidenceB > ShadowConfidenceA
+      )
+   )
+      return INIT_PARAMETERS_INCORRECT;
+
    if(!SymbolSelect(TradeSymbol, true))
       return INIT_FAILED;
 
@@ -1259,6 +1804,10 @@ int OnInit()
 
    DemoGoalStatus = "COLLECTING 0/" + IntegerToString(DemoGoalWindowDays);
 
+   InitShadowState(ShadowA, ShadowConfidenceA);
+   InitShadowState(ShadowB, ShadowConfidenceB);
+   InitializeShadowJournal();
+
    Comment("");
    DeletePanel();
    EventSetTimer(1);
@@ -1272,13 +1821,26 @@ int OnInit()
    RefreshSignal();
    LastSignalMs = GetTickCount64();
 
-   Print("MetaTraderAI ready: ONE EA on ", TradeSymbol, " M15. demo_auto=", TradingArmed);
+   Print(
+      "MetaTraderAI ready: ONE EA on ", TradeSymbol,
+      " M15. demo_auto=", TradingArmed,
+      " shadow=", EnableShadowMode,
+      " C", ShadowConfidenceA,
+      "/C", ShadowConfidenceB
+   );
    return INIT_SUCCEEDED;
+}
+
+void OnTick()
+{
+   UpdateShadowPositions();
 }
 
 void OnTimer()
 {
    ulong now_ms = GetTickCount64();
+
+   UpdateShadowPositions();
 
    if(now_ms - LastBridgeMs >= (ulong)BridgeSeconds * 1000)
    {
