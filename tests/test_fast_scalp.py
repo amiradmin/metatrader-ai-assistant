@@ -7,7 +7,7 @@ from meta_trader_ai.models import Action, NewsCoverage, NewsRisk
 
 
 def _bullish_snapshot(*, positions_total: int = 0) -> FastScalpSnapshot:
-    closes = [4000.0 + index * 0.08 for index in range(40)]
+    closes = [4000.0 + index * 0.12 for index in range(40)]
     opens = [value - 0.05 for value in closes]
     highs = [value + 0.10 for value in closes]
     lows = [value - 0.15 for value in closes]
@@ -102,9 +102,8 @@ def test_unavailable_news_degrades_confidence_without_high_news_hard_stop() -> N
 
 
 def test_wide_spread_is_hard_blocked() -> None:
-    snapshot = _bullish_snapshot().model_copy(
-        update={"ask": _bullish_snapshot().bid + 0.10}
-    )
+    base = _bullish_snapshot()
+    snapshot = base.model_copy(update={"ask": base.bid + 0.10})
 
     hint = build_fast_scalp_hint(
         snapshot,
