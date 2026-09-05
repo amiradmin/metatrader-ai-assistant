@@ -21,19 +21,6 @@ class Settings(BaseSettings):
     max_risk_percent: float = 0.5
     max_daily_loss_percent: float = 1.5
     max_spread_atr_ratio: float = 0.25
-
-    fast_scalp_enabled: bool = True
-    fast_scalp_snapshot_path: Path = Path("data/fast_scalp_m1_snapshot.json")
-    fast_scalp_max_snapshot_age_seconds: int = 5
-    fast_scalp_min_confidence: int = 72
-    fast_scalp_max_risk_percent: float = 0.25
-    fast_scalp_max_open_positions: int = 2
-    fast_scalp_max_daily_loss_percent: float = 1.0
-    fast_scalp_max_spread_atr_ratio: float = 0.18
-    fast_scalp_entry_ttl_seconds: int = 90
-    fast_scalp_external_data_timeout_seconds: float = 1.5
-    fast_scalp_news_cache_seconds: int = 30
-
     news_lookback_hours: int = 24
     high_impact_block_minutes: int = 30
     signal_external_data_timeout_seconds: float = 4.0

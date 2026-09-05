@@ -24,7 +24,6 @@ cross-validate-lona = "meta_trader_ai.cross_validator_diagnostic:main"
 anti-chase-sweep = "meta_trader_ai.anti_chase_sweep:main"
 anti-chase-walk-forward = "meta_trader_ai.anti_chase_walk_forward:main"
 desktop-signal-notifier = "meta_trader_ai.desktop_notifier:main"
-fast-scalp-backtest = "meta_trader_ai.fast_scalp_backtest:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<9", "pytest-asyncio>=0.25,<1", "ruff>=0.9,<1"]
