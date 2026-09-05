@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     max_context_age_seconds: int = 90
     demo_trade_journal_path: Path = Path("data/demo_trade_journal.csv")
     market_structure_enabled: bool = True
+    course_decision_tree_enabled: bool = True
+    course_range_lookback: int = 24
+    course_trend_lookback: int = 20
+    course_range_edge_fraction: float = 0.20
+    course_touch_tolerance_atr: float = 0.20
+    course_breakout_step_bars: int = 5
+    course_breakout_body_multiple: float = 1.50
     strict_entry_min_confidence: int = 75
     max_risk_percent: float = 0.5
     max_daily_loss_percent: float = 1.5
