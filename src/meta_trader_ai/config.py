@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     fast_scalp_max_daily_loss_percent: float = 1.0
     fast_scalp_max_spread_atr_ratio: float = 0.18
     fast_scalp_entry_ttl_seconds: int = 90
+    fast_scalp_external_data_timeout_seconds: float = 1.5
+    fast_scalp_news_cache_seconds: int = 30
 
     news_lookback_hours: int = 24
     high_impact_block_minutes: int = 30
