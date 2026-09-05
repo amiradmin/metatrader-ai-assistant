@@ -105,6 +105,34 @@ FAST_SCALP_SNAPSHOT_PATH=/.../MQL5/Files/fast_scalp_m1_snapshot.json
 
 The EA refuses to initialize on a non-M1 chart or a symbol different from its configured `TradeSymbol`.
 
+## Historical backtest
+
+The existing `mt5/ExportM1History.mq5` script exports `xauusd_m1_history.csv`. Run the new technical baseline with:
+
+```bash
+uv run fast-scalp-backtest /path/to/xauusd_m1_history.csv
+```
+
+or directly:
+
+```bash
+uv run python -m meta_trader_ai.fast_scalp_backtest /path/to/xauusd_m1_history.csv
+```
+
+Useful overrides:
+
+```bash
+uv run fast-scalp-backtest /path/to/xauusd_m1_history.csv \
+  --point-size 0.01 \
+  --balance 1000 \
+  --max-positions 2 \
+  --risk-percent 0.25
+```
+
+The report includes trades, win rate, profit factor, expectancy in R/trade, net R, balance return, max drawdown, blocked reasons, and the maximum concurrent positions actually observed.
+
+The simulator is causal at M1 bar boundaries: signals only use completed M1 candles and fully completed M5 closes. When both SL and TP fall inside one M1 bar, it resolves the stop first as a conservative assumption. Historical news and exact tick ordering are not reconstructed.
+
 ## Validation status
 
 The initial parameters are engineering defaults, not evidence of profitability. Before increasing the position cap or using a live account, validate expectancy, profit factor, drawdown, spread/slippage sensitivity, and consecutive-loss behavior with exported M1 history and demo forward testing.
