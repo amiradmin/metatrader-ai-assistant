@@ -9,6 +9,10 @@ from fastapi import FastAPI, HTTPException
 from meta_trader_ai.bridge import SnapshotError, load_snapshot
 from meta_trader_ai.calendar_service import collect_calendar_news_resilient
 from meta_trader_ai.config import settings
+from meta_trader_ai.course_decision_tree import (
+    CourseDecisionConfig,
+    apply_course_decision_tree,
+)
 from meta_trader_ai.economic_calendar import EconomicCalendarError
 from meta_trader_ai.market_structure import MarketStructureError, load_structure_context
 from meta_trader_ai.models import NewsCoverage, NewsItem, TipRanksContext, TradeHint
@@ -175,7 +179,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MetaTrader AI Assistant",
-    version="0.4.5",
+    version="0.5.0-course-tree",
     lifespan=lifespan,
 )
 
@@ -184,7 +188,10 @@ app = FastAPI(
 def health() -> dict[str, str]:
     return {
         "status": "ok",
-        "mode": "guarded",
+        "mode": "guarded-course-tree",
+        "course_decision_tree": (
+            "enabled" if settings.course_decision_tree_enabled else "disabled"
+        ),
         "economic_calendar": (
             "enabled-degraded"
             if settings.economic_calendar_enabled
@@ -258,6 +265,19 @@ async def hint() -> TradeHint:
         news_coverage=news_coverage,
         failed_news_sources=failed_news_sources,
     )
+    if settings.course_decision_tree_enabled:
+        trade_hint = apply_course_decision_tree(
+            snapshot,
+            trade_hint,
+            CourseDecisionConfig(
+                range_lookback=settings.course_range_lookback,
+                trend_lookback=settings.course_trend_lookback,
+                range_edge_fraction=settings.course_range_edge_fraction,
+                touch_tolerance_atr=settings.course_touch_tolerance_atr,
+                breakout_step_bars=settings.course_breakout_step_bars,
+                breakout_body_multiple=settings.course_breakout_body_multiple,
+            ),
+        )
     return apply_pretrade_controls(
         snapshot,
         trade_hint,
