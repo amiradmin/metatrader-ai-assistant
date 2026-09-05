@@ -1,7 +1,7 @@
 """Course-informed market-cycle gates for the M15 decision engine.
 
 This module translates a small set of rules from the user's trading course into
-causal, testable features.  It is deliberately conservative: it may preserve or
+causal, testable features. It is deliberately conservative: it may preserve or
 block an existing BUY/SELL hint, but it never manufactures a new direction.
 
 Source-derived ideas:
@@ -14,7 +14,7 @@ Source-derived ideas:
   and a break beyond the wick-defined range extreme.
 
 Engineering proxies (not verbatim course rules): numerical regime thresholds,
-20% range-edge bands, touch tolerance, and the causal lookback windows.  These
+20% range-edge bands, touch tolerance, and the causal lookback windows. These
 must be validated by backtest/walk-forward before production weighting.
 """
 
@@ -230,7 +230,10 @@ def _range_context(
     step_bars = max(2, config.breakout_step_bars)
     body_sample = [
         abs(close_value - open_value)
-        for open_value, close_value in zip(prior_opens[-step_bars:], prior_closes[-step_bars:])
+        for open_value, close_value in zip(
+            prior_opens[-step_bars:],
+            prior_closes[-step_bars:],
+        )
     ]
     step_body = max(fmean(body_sample) if body_sample else atr, 1e-12)
     large_body = latest_body >= config.breakout_body_multiple * step_body
@@ -239,7 +242,9 @@ def _range_context(
     down_candidate = latest_low < range_low
 
     if up_candidate:
-        beyond_fraction = max(0.0, latest_high - max(latest_low, range_high)) / latest_range
+        beyond_fraction = (
+            max(0.0, latest_high - max(latest_low, range_high)) / latest_range
+        )
         penetration = beyond_fraction > 0.50
         wick_extreme_broken = latest_high > range_high
         closes_outside = latest_close > range_high
@@ -248,7 +253,9 @@ def _range_context(
         else:
             breakout = BreakoutStatus.FAKE_UP
     elif down_candidate:
-        beyond_fraction = max(0.0, min(latest_high, range_low) - latest_low) / latest_range
+        beyond_fraction = (
+            max(0.0, min(latest_high, range_low) - latest_low) / latest_range
+        )
         penetration = beyond_fraction > 0.50
         wick_extreme_broken = latest_low < range_low
         closes_outside = latest_close < range_low
@@ -335,20 +342,25 @@ def apply_course_decision_tree(
     if action not in {Action.BUY, Action.SELL}:
         return hint
 
-    if state.regime in {CourseRegime.UNKNOWN}:
+    if state.regime is CourseRegime.UNKNOWN:
         _block(hint, "Course tree blocked direction because OHLC context is unavailable.")
         return hint
 
-    if state.regime in {CourseRegime.STRONG_UPTREND, CourseRegime.SPIKE_UP} and action is Action.SELL:
+    if (
+        state.regime in {CourseRegime.STRONG_UPTREND, CourseRegime.SPIKE_UP}
+        and action is Action.SELL
+    ):
         _block(hint, f"Course trend priority blocked SELL against {state.regime.value}.")
         return hint
-    if state.regime in {CourseRegime.STRONG_DOWNTREND, CourseRegime.SPIKE_DOWN} and action is Action.BUY:
+    if (
+        state.regime in {CourseRegime.STRONG_DOWNTREND, CourseRegime.SPIKE_DOWN}
+        and action is Action.BUY
+    ):
         _block(hint, f"Course trend priority blocked BUY against {state.regime.value}.")
         return hint
 
-    if state.regime is not CourseRegime.RANGE:
-        return hint
-
+    # Breakout validation is evaluated before the regime label can transition
+    # away from RANGE on the breakout candle itself.
     if state.breakout_status is BreakoutStatus.VALID_UP:
         if action is Action.SELL:
             _block(hint, "Validated upside range breakout blocked SELL.")
@@ -362,6 +374,9 @@ def apply_course_decision_tree(
         return hint
     if state.breakout_status is BreakoutStatus.FAKE_DOWN and action is Action.SELL:
         _block(hint, "Fake downside breakout blocked SELL until price re-establishes range context.")
+        return hint
+
+    if state.regime is not CourseRegime.RANGE:
         return hint
 
     if state.range_zone is RangeZone.MIDDLE:
