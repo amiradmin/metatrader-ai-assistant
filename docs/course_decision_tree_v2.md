@@ -1,6 +1,8 @@
 # Course-informed Decision Tree v2
 
-This branch experiments with translating selected rules from the uploaded trading course into causal, testable M15 decision gates. It does **not** replace the existing news, spread, daily-risk, confidence, or H1/H4 safety controls.
+Branch: `feature/course-decision-tree-v2`
+
+This branch experiments with translating selected rules from the uploaded trading course into causal, testable M15 decision gates. `main` is intentionally untouched. The experiment does **not** replace the existing news, spread, daily-risk, confidence, or H1/H4 safety controls.
 
 ## Source-derived rules implemented
 
@@ -62,10 +64,25 @@ COURSE_BREAKOUT_STEP_BARS=5
 COURSE_BREAKOUT_BODY_MULTIPLE=1.50
 ```
 
+## Baseline vs course-tree comparison
+
+The branch adds a dedicated comparison command that replays the same XAUUSD M15 candles through both paths while keeping the same next-bar entry and fixed SL/TP simulator:
+
+```bash
+uv run course-tree-backtest data/xauusd_m15_history.csv \
+  --symbol XAUUSD_o \
+  --point-size 0.01 \
+  --sl-points 300 \
+  --tp-points 600 \
+  --thresholds 70,75,80,85,90
+```
+
+The report shows signals, trades, win rate, profit factor, net R, max drawdown and the net-R delta for baseline vs course tree. Historical news, TipRanks and H1/H4 execution gates are not reconstructed by this comparison, matching the limitations of the existing baseline backtester.
+
 ## Next validation steps
 
 1. Run unit tests.
-2. Backtest `main` vs this branch on the same XAUUSD M15 history.
-3. Compare expectancy, PF, drawdown, trade count, and the exact trades blocked by the course tree.
+2. Run `course-tree-backtest` on the same XAUUSD M15 history used by the baseline.
+3. Inspect expectancy/PF/drawdown and which trades were blocked.
 4. Run walk-forward validation.
 5. Only after evidence improves, add FVG / supply-demand / QM / MTR / ACD and multi-target exit experiments.
