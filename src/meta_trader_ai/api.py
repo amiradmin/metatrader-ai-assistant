@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, HTTPException
@@ -10,6 +11,11 @@ from meta_trader_ai.bridge import SnapshotError, load_snapshot
 from meta_trader_ai.calendar_service import collect_calendar_news_resilient
 from meta_trader_ai.config import settings
 from meta_trader_ai.economic_calendar import EconomicCalendarError
+from meta_trader_ai.fast_scalp import FastScalpHint, build_fast_scalp_hint
+from meta_trader_ai.fast_scalp_bridge import (
+    FastScalpSnapshotError,
+    load_fast_scalp_snapshot,
+)
 from meta_trader_ai.market_structure import MarketStructureError, load_structure_context
 from meta_trader_ai.models import NewsCoverage, NewsItem, TipRanksContext, TradeHint
 from meta_trader_ai.news import NewsCollection, collect_news_report
@@ -19,6 +25,11 @@ from meta_trader_ai.tipranks import TipRanksContextError, load_context, save_con
 from meta_trader_ai.tipranks_mcp import TipRanksMcpError, fetch_forex_context
 
 logger = logging.getLogger(__name__)
+
+_fast_scalp_news_cache: dict[
+    str,
+    tuple[float, list[NewsItem], NewsCoverage, int],
+] = {}
 
 
 async def refresh_tipranks_context() -> TipRanksContext:
@@ -63,13 +74,17 @@ async def _tipranks_refresh_loop() -> None:
         await asyncio.sleep(interval_seconds)
 
 
-async def _collect_signal_news(symbol: str) -> tuple[list[NewsItem], NewsCoverage, int]:
+async def _collect_signal_news(
+    symbol: str,
+    *,
+    timeout_seconds: float | None = None,
+) -> tuple[list[NewsItem], NewsCoverage, int]:
     """Collect external news under a hard latency budget.
 
     MT5/Wine can surface a non-standard HTTP 1003 when WebRequest waits too long.
     Signal generation must therefore never wait for slow RSS/calendar providers.
     Timed-out sources are reported as unavailable and the signal engine applies
-    its normal confidence penalty instead of losing the whole /hint response.
+    its normal confidence penalty instead of losing the whole response.
     """
     rss_task: asyncio.Task[NewsCollection] = asyncio.create_task(
         collect_news_report(settings.rss_urls, settings.news_lookback_hours)
@@ -98,15 +113,20 @@ async def _collect_signal_news(symbol: str) -> tuple[list[NewsItem], NewsCoverag
     if calendar_task is not None:
         tasks.add(calendar_task)
 
-    timeout_seconds = max(0.5, settings.signal_external_data_timeout_seconds)
-    _, pending = await asyncio.wait(tasks, timeout=timeout_seconds)
+    budget = (
+        settings.signal_external_data_timeout_seconds
+        if timeout_seconds is None
+        else timeout_seconds
+    )
+    budget = max(0.5, budget)
+    _, pending = await asyncio.wait(tasks, timeout=budget)
     for task in pending:
         task.cancel()
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
         logger.warning(
             "Signal external-data deadline reached after %.2fs; using degraded news coverage.",
-            timeout_seconds,
+            budget,
         )
 
     news: list[NewsItem] = []
@@ -152,6 +172,26 @@ async def _collect_signal_news(symbol: str) -> tuple[list[NewsItem], NewsCoverag
     return news, coverage, failed_sources
 
 
+async def _collect_fast_scalp_news(
+    symbol: str,
+) -> tuple[list[NewsItem], NewsCoverage, int]:
+    """Return short-lived cached news so M1 polling stays responsive."""
+    cache_key = symbol.upper()
+    now = time.monotonic()
+    cached = _fast_scalp_news_cache.get(cache_key)
+    if cached is not None:
+        stored_at, items, coverage, failures = cached
+        if now - stored_at <= max(1, settings.fast_scalp_news_cache_seconds):
+            return list(items), coverage, failures
+
+    result = await _collect_signal_news(
+        symbol,
+        timeout_seconds=settings.fast_scalp_external_data_timeout_seconds,
+    )
+    _fast_scalp_news_cache[cache_key] = (now, list(result[0]), result[1], result[2])
+    return result
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage the optional TipRanks background refresh task."""
@@ -175,7 +215,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MetaTrader AI Assistant",
-    version="0.4.5",
+    version="0.5.0",
     lifespan=lifespan,
 )
 
@@ -185,6 +225,7 @@ def health() -> dict[str, str]:
     return {
         "status": "ok",
         "mode": "guarded",
+        "fast_scalp": "enabled" if settings.fast_scalp_enabled else "disabled",
         "economic_calendar": (
             "enabled-degraded"
             if settings.economic_calendar_enabled
@@ -213,6 +254,37 @@ async def refresh_tipranks_now() -> TipRanksContext:
         return await refresh_tipranks_context()
     except TipRanksMcpError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/fast-scalp/hint", response_model=FastScalpHint)
+async def fast_scalp_hint() -> FastScalpHint:
+    """Return the independent guarded M1 fast-scalp decision."""
+    if not settings.fast_scalp_enabled:
+        raise HTTPException(status_code=503, detail="FAST_SCALP_M1 is disabled")
+
+    try:
+        snapshot = load_fast_scalp_snapshot(
+            settings.fast_scalp_snapshot_path,
+            settings.fast_scalp_max_snapshot_age_seconds,
+        )
+    except FastScalpSnapshotError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    news, news_coverage, failed_news_sources = await _collect_fast_scalp_news(
+        snapshot.symbol
+    )
+    return build_fast_scalp_hint(
+        snapshot,
+        news,
+        max_risk_percent=settings.fast_scalp_max_risk_percent,
+        max_open_positions=settings.fast_scalp_max_open_positions,
+        max_daily_loss_percent=settings.fast_scalp_max_daily_loss_percent,
+        max_spread_atr_ratio=settings.fast_scalp_max_spread_atr_ratio,
+        min_confidence=settings.fast_scalp_min_confidence,
+        entry_ttl_seconds=settings.fast_scalp_entry_ttl_seconds,
+        news_coverage=news_coverage,
+        failed_news_sources=failed_news_sources,
+    )
 
 
 @app.get("/hint", response_model=TradeHint)
