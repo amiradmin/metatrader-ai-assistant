@@ -83,6 +83,12 @@ class TradeHint(BaseModel):
     h4_trend: str = "UNAVAILABLE"
     h4_structure: str = "UNAVAILABLE"
     h4_structure_event: str = "NONE"
+    course_tree_status: str = "DISABLED"
+    course_regime: str = "UNAVAILABLE"
+    course_range_zone: str = "UNAVAILABLE"
+    course_breakout_status: str = "UNAVAILABLE"
+    course_lower_touch_count: int = Field(default=0, ge=0)
+    course_upper_touch_count: int = Field(default=0, ge=0)
     reasons: list[str]
     relevant_news: list[NewsItem]
     max_risk_percent: float
